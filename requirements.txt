@@ -1,0 +1,8 @@
+numpy
+faster-whisper
+openai-whisper
+pynput
+sounddevice
+vosk
+onnx-asr[cpu,hub]
+sherpa-onnx

@@ -1,0 +1,80 @@
+{
+  "auto_max_utterance_seconds": 90.0,
+  "auto_pause_hotkey": "ctrl",
+  "auto_poll_seconds": 0.05,
+  "auto_pre_roll_seconds": 1.5,
+  "auto_sherpa_vad_min_silence_seconds": 0.2,
+  "auto_sherpa_vad_min_speech_seconds": 0.05,
+  "auto_sherpa_vad_model": "models/silero_vad.onnx",
+  "auto_sherpa_vad_num_threads": 1,
+  "auto_sherpa_vad_provider": "cpu",
+  "auto_sherpa_vad_threshold": 0.5,
+  "auto_start_speech_ms": 60,
+  "auto_trigger_aliases": [],
+  "auto_trigger_min_probe_seconds": 1.0,
+  "auto_trigger_probe_seconds": 0.5,
+  "auto_trigger_probe_window_seconds": 1.5,
+  "auto_trigger_silence_seconds": 2.0,
+  "auto_trigger_word": "agent",
+  "auto_tmux_switch_session": null,
+  "auto_tmux_switch_words": {},
+  "auto_vad_backend": "sherpa",
+  "backend_retry_cooldown": 300,
+  "channels": 1,
+  "chunk_pause_window_seconds": 1.0,
+  "chunk_transcribe_seconds": 20.0,
+  "chunk_vad_frame_ms": 30,
+  "chunk_vad_silence_ms": 240,
+  "chunk_vad_threshold": 0.012,
+  "chunked_transcription": true,
+  "device": null,
+  "fallback_backend": null,
+  "faster_whisper_compute_type": "int8",
+  "faster_whisper_device": "cpu",
+  "hotkey": "right_shift",
+  "paste_append_space": false,
+  "paste_debug": false,
+  "paste_delay": 0.1,
+  "paste_mode": "type",
+  "remote_url": "http://127.0.0.1:8765/transcribe",
+  "remote_wait_interval": 0.5,
+  "remote_wait_timeout": 300,
+  "run_mode": "auto",
+  "sample_rate": 16000,
+  "sherpa_model_dir": "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+  "sherpa_model_type": "auto",
+  "sherpa_provider": "cpu",
+  "submit_enter_delay_seconds": 0.5,
+  "torch_empty_cache_after_transcribe": null,
+  "transcribe_backend": "sherpa",
+  "transcribe_request_timeout": 120,
+  "transcript_history_path": "transcript-history.txt",
+  "whisper_fp16": true,
+  "whisper_language": null,
+  "whisper_model": "base",
+  "whisper_task": "transcribe",
+  "agent_workbench": {
+    "agent_command": "codex",
+    "agents": [
+      {
+        "name": "Agent 1",
+        "path": "~"
+      },
+      {
+        "name": "Agent 2",
+        "path": "~"
+      },
+      {
+        "name": "Agent 3",
+        "path": "~"
+      }
+    ],
+    "layout": "panes",
+    "panes_window": "Workbench",
+    "session_name": "speech-agent-workbench",
+    "voice": {
+      "name": "Voice",
+      "path": "."
+    }
+  }
+}
