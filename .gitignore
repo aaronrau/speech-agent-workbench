@@ -5,12 +5,16 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 tmp/
+*.pid
 *.log
 *.wav
 *.deb
 
+# Local configuration and generated speech history.
 config.json
-transcript-history.txt
+*.local.json
+transcript-history*.txt
+*-history.txt
 
 models/*
 !models/
