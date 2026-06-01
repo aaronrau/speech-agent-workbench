@@ -5760,6 +5760,14 @@ def main():
         if not trigger_clicked and not auto_trigger_session["clicked"]:
             click_auto_trigger_target()
         if not queued_text:
+            if auto_trigger_session.get("source") == "probe":
+                print(
+                    f"[auto] trigger '{auto_trigger_word}' confirmed with no queued "
+                    "text; ending utterance."
+                )
+                reset_auto_trigger_session(auto_trigger_session)
+                print_auto_waiting()
+                return
             arm_auto_trigger_session(auto_trigger_session, "trigger_only")
             print(
                 f"[auto] trigger '{auto_trigger_word}' armed; "

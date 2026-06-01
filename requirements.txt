@@ -3,6 +3,7 @@ faster-whisper
 openai-whisper
 pynput
 sounddevice
+soundfile
 vosk
 onnx-asr[cpu,hub]
 sherpa-onnx

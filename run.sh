@@ -92,7 +92,7 @@ ensure_python_env() {
 import importlib.util
 import sys
 
-required = ("numpy", "sounddevice", "pynput", "onnx_asr", "sherpa_onnx")
+required = ("numpy", "sounddevice", "soundfile", "pynput", "onnx_asr", "sherpa_onnx")
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 if missing:
     print("[run] missing Python dependencies: " + ", ".join(missing), file=sys.stderr)
@@ -114,6 +114,7 @@ PY
         "$PYTHON_BIN" -m pip install \
           numpy \
           sounddevice \
+          soundfile \
           pynput \
           'onnx-asr[cpu,hub]' \
           sherpa-onnx
