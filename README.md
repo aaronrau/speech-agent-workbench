@@ -51,6 +51,28 @@ Important fields:
 - `agent_workbench.agent_command`: command to start in each agent pane
 - `agent_workbench.agents`: pane names and working directories
 
+### Voice-Friendly Names
+
+Use short names with hard consonants and distinct vowel sounds so STT does not
+confuse pane names with each other or with command words like `yes`, `no`,
+`send`, `save`, or `stop`.
+
+Good examples:
+
+- `Flux`
+- `Forge`
+- `Niles`
+- `Knox`
+- `Pike`
+- `Slate`
+- `Brock`
+- `Vance`
+- `Rook`
+- `Wolf`
+
+Avoid names that sound like common confirmations or commands, such as `Jazz`
+near `yes`, `Bo` near `no`, or `Sage` near `save`.
+
 ## Run Plain Dictation
 
 ```bash
@@ -81,6 +103,29 @@ The app clicks the current mouse position, types the words after the trigger, an
 On interactive launch, the workbench script shows the saved agent command, pane names, and paths. Accept the defaults or update them. The values are saved in `config.json`.
 When launched through `./run-auto.sh`, model downloads are checked in the foreground before tmux starts so download/cache logs are visible. Set `VOICE_AUTO_PREFETCH_MODELS=off` to skip that foreground check.
 The launcher does not block on the voice pane by default after startup. Set `AUTO_READY_TIMEOUT=300` to wait for a ready signal from the listener.
+
+### Example Run
+
+With `agent_workbench.agent_command` set to `codex`, the launcher creates
+three Codex panes and one voice orchestrator pane. A tiled tmux workbench might
+look like this:
+
+```text
++------------------------------+------------------------------+
+| Flux                         | Forge                        |
+| $ codex                      | $ codex                      |
+| > Review phone verification  | > Add backend validation     |
+|                              |                              |
++------------------------------+------------------------------+
+| Niles                        | Wolf                         |
+| $ codex                      | $ ./run-auto.sh              |
+| > Update Flutter states      | [auto] parakeet-onnx ready   |
+|                              | routes: "forge add tests"    |
++------------------------------+------------------------------+
+```
+
+Say `forge add tests for phone verification` to send that prompt to the
+`Forge` pane, or `wolf terminate session` to stop the voice workbench.
 
 ## Notes
 
