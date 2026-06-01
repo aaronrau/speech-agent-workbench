@@ -2,6 +2,12 @@
 
 Voice control for Linux agent workspaces: speak a command, route it to the right tmux agent, and submit it without touching the keyboard.
 
+## Project Status
+
+This is an experimental testbed for exploring voice-driven human-agent
+interaction. It is not production-ready, hardened, or designed to scale; treat
+it as a fun local script for trying ideas quickly.
+
 ## Features
 
 - Plain dictation mode that types text into the focused app after a trigger word.
