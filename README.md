@@ -79,7 +79,7 @@ The app clicks the current mouse position, types the words after the trigger, an
 
 On interactive launch, the workbench script shows the saved agent command, pane names, and paths. Accept the defaults or update them. The values are saved in `config.json`.
 When launched through `./run-auto.sh`, model downloads are checked in the foreground before tmux starts so download/cache logs are visible. Set `VOICE_AUTO_PREFETCH_MODELS=off` to skip that foreground check.
-The launcher waits for the voice listener to finish loading its STT/VAD models before it reports the session ready. Set `AUTO_READY_TIMEOUT=off` to skip that wait.
+The launcher does not block on the voice pane by default after startup. Set `AUTO_READY_TIMEOUT=300` to wait for a ready signal from the listener.
 
 ## Notes
 

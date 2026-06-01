@@ -21,7 +21,7 @@ AUTO_LOG="${AUTO_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-auto.log}"
 AUTO_PID_FILE="${AUTO_PID_FILE:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-auto.pid}"
 AUTO_FOCUS_LOG="${AUTO_FOCUS_LOG:-${VOICE_AUTO_FOCUS_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-focus.log}}"
 AUTO_READY_FILE="${AUTO_READY_FILE:-${VOICE_READY_FILE:-}}"
-AUTO_READY_TIMEOUT="${AUTO_READY_TIMEOUT:-${VOICE_READY_TIMEOUT:-300}}"
+AUTO_READY_TIMEOUT="${AUTO_READY_TIMEOUT:-${VOICE_READY_TIMEOUT:-off}}"
 
 usage() {
   cat <<'EOF'
@@ -43,7 +43,7 @@ Optional environment variables:
   AUTO_STT_MODE=auto
   ATTACH=1
   AUTO_FOCUS_LOG=/tmp/speech-agent-workbench-focus.log
-  AUTO_READY_TIMEOUT=300
+  AUTO_READY_TIMEOUT=off
 EOF
 }
 
