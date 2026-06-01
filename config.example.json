@@ -48,7 +48,7 @@
   "sherpa_provider": "cpu",
   "submit_enter_delay_seconds": 0.5,
   "torch_empty_cache_after_transcribe": null,
-  "transcribe_backend": "sherpa",
+  "transcribe_backend": "parakeet-onnx",
   "transcribe_request_timeout": 120,
   "transcript_history_path": "transcript-history.txt",
   "whisper_fp16": true,

@@ -120,6 +120,17 @@ terminate_words_for_voice() {
     "$voice_word" "$voice_word" "$voice_word" "$voice_word"
 }
 
+prefetch_voice_models() {
+  case "${VOICE_AUTO_PREFETCH_MODELS:-1}" in
+    0|false|no|none|null|off)
+      return
+      ;;
+  esac
+
+  echo "[auto] checking voice model downloads before starting workbench..."
+  VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_PREFETCH_ONLY=1 "$ROOT/run.sh"
+}
+
 default_switches() {
   local agent1_word
   local agent2_word
@@ -182,6 +193,7 @@ export VOICE_AUTO_FOCUS_LOG="${VOICE_AUTO_FOCUS_LOG:-${XDG_RUNTIME_DIR:-/tmp}/sp
 case "${VOICE_AUTO_START_AGENT_WORKBENCH:-1}" in
   1|true|yes|on)
     if [[ -x "$ROOT/start-agent-workbench.sh" ]]; then
+      prefetch_voice_models
       exec env SESSION_NAME="$AUTO_TMUX_SESSION" "$ROOT/start-agent-workbench.sh" "$@"
     else
       echo "[auto] start-agent-workbench.sh is missing or not executable; skipping agent startup." >&2

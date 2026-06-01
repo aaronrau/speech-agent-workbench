@@ -20,6 +20,8 @@ ATTACH="${ATTACH:-1}"
 AUTO_LOG="${AUTO_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-auto.log}"
 AUTO_PID_FILE="${AUTO_PID_FILE:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-auto.pid}"
 AUTO_FOCUS_LOG="${AUTO_FOCUS_LOG:-${VOICE_AUTO_FOCUS_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-focus.log}}"
+AUTO_READY_FILE="${AUTO_READY_FILE:-${VOICE_READY_FILE:-}}"
+AUTO_READY_TIMEOUT="${AUTO_READY_TIMEOUT:-${VOICE_READY_TIMEOUT:-300}}"
 
 usage() {
   cat <<'EOF'
@@ -41,6 +43,7 @@ Optional environment variables:
   AUTO_STT_MODE=auto
   ATTACH=1
   AUTO_FOCUS_LOG=/tmp/speech-agent-workbench-focus.log
+  AUTO_READY_TIMEOUT=300
 EOF
 }
 
@@ -368,13 +371,64 @@ auto_stt_command() {
   trigger_word="$(normalize_spoken_name "$AGENT1_NAME")"
   local terminate_words
   terminate_words="$(terminate_words_for_voice "$(normalize_spoken_name "$VOICE_NAME")")"
-  printf 'VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_TMUX_SWITCHES=%q VOICE_AUTO_DISPLAY_WORDS=%q VOICE_AUTO_TRIGGER_WORD=%q VOICE_AUTO_TMUX_TERMINATE_WORDS=%q VOICE_AUTO_FOCUS_LOG=%q %q' \
-    "$SESSION_NAME" "$switches" "$words" "$trigger_word" "$terminate_words" "$AUTO_FOCUS_LOG" "$ROOT/run-auto.sh"
+  printf 'VOICE_READY_FILE=%q VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_TMUX_SWITCHES=%q VOICE_AUTO_DISPLAY_WORDS=%q VOICE_AUTO_TRIGGER_WORD=%q VOICE_AUTO_TMUX_TERMINATE_WORDS=%q VOICE_AUTO_FOCUS_LOG=%q %q' \
+    "$AUTO_READY_FILE" "$SESSION_NAME" "$switches" "$words" "$trigger_word" "$terminate_words" "$AUTO_FOCUS_LOG" "$ROOT/run-auto.sh"
 }
 
 process_is_running() {
   local pid="$1"
   [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1
+}
+
+auto_ready_timeout_seconds() {
+  local value="${AUTO_READY_TIMEOUT,,}"
+  case "$value" in
+    ""|0|false|no|none|null|off)
+      echo 0
+      return
+      ;;
+  esac
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "$value"
+  else
+    echo 300
+  fi
+}
+
+clear_auto_stt_ready() {
+  if [[ -z "$AUTO_READY_FILE" ]]; then
+    return
+  fi
+  mkdir -p "$(dirname "$AUTO_READY_FILE")"
+  rm -f "$AUTO_READY_FILE"
+}
+
+wait_for_auto_stt_ready() {
+  local pid="${1:-}"
+  local timeout
+  timeout="$(auto_ready_timeout_seconds)"
+  if [[ -z "$AUTO_READY_FILE" || "$timeout" == "0" ]]; then
+    return 0
+  fi
+
+  echo "[agents] waiting for voice models to load..."
+  local start
+  start="$(date +%s)"
+  while true; do
+    if [[ -s "$AUTO_READY_FILE" ]]; then
+      echo "[agents] voice models ready: $AUTO_READY_FILE"
+      return 0
+    fi
+    if [[ -n "$pid" ]] && ! process_is_running "$pid"; then
+      echo "[agents] auto STT exited before voice models were ready." >&2
+      return 1
+    fi
+    if (( $(date +%s) - start >= timeout )); then
+      echo "[agents] voice models were not ready after ${timeout}s." >&2
+      return 1
+    fi
+    sleep 1
+  done
 }
 
 start_auto_stt() {
@@ -403,36 +457,45 @@ start_auto_stt() {
     voice_pane="$(get_pane_by_title "$VOICE_NAME")"
     if [[ "$(tmux display-message -p -t "$voice_pane" '#{pane_current_command}' 2>/dev/null || true)" == "python" ]]; then
       echo "[agents] auto STT already running in pane: $voice_pane"
+      wait_for_auto_stt_ready
       return
     fi
+    clear_auto_stt_ready
     tmux send-keys -t "$voice_pane" C-c
     tmux send-keys -t "$voice_pane" "$command" C-m
     echo "[agents] auto STT running in pane: $voice_pane"
+    wait_for_auto_stt_ready
     return
   fi
 
   if [[ "$mode" == "session" ]]; then
     if tmux has-session -t "$VOICE_SESSION" 2>/dev/null; then
       echo "[agents] auto STT tmux session already exists: $VOICE_SESSION"
+      wait_for_auto_stt_ready
       return
     fi
+    clear_auto_stt_ready
     tmux new-session -d -s "$VOICE_SESSION" -n "$VOICE_WINDOW" -c "$VOICE_DIR"
     tmux select-pane -t "$VOICE_SESSION:$VOICE_WINDOW.0" -T "$VOICE_NAME" -P "$VOICE_STYLE"
     tmux send-keys -t "$VOICE_SESSION:$VOICE_WINDOW" "$command" C-m
     echo "[agents] auto STT running in tmux session: $VOICE_SESSION"
+    wait_for_auto_stt_ready
     return
   fi
 
   if [[ "$mode" == "tmux" ]]; then
     if tmux list-windows -t "$SESSION_NAME" -F '#W' 2>/dev/null | grep -Fxq "$VOICE_WINDOW"; then
       echo "[agents] auto STT tmux window already exists: $VOICE_WINDOW"
+      wait_for_auto_stt_ready
       return
     fi
+    clear_auto_stt_ready
     tmux new-window -d -t "$SESSION_NAME" -n "$VOICE_WINDOW" -c "$VOICE_DIR"
     tmux select-pane -t "$SESSION_NAME:$VOICE_WINDOW.0" -T "$VOICE_NAME" -P "$VOICE_STYLE"
     tmux set-option -pt "$SESSION_NAME:$VOICE_WINDOW.0" @agent_name "$VOICE_NAME"
     tmux send-keys -t "$SESSION_NAME:$VOICE_WINDOW" "$command" C-m
     echo "[agents] auto STT running in tmux window: $VOICE_WINDOW"
+    wait_for_auto_stt_ready
     return
   fi
 
@@ -441,6 +504,7 @@ start_auto_stt() {
     existing_pid="$(<"$AUTO_PID_FILE")"
     if process_is_running "$existing_pid"; then
       echo "[agents] auto STT already running: pid $existing_pid"
+      wait_for_auto_stt_ready "$existing_pid"
       return
     fi
     rm -f "$AUTO_PID_FILE"
@@ -448,7 +512,9 @@ start_auto_stt() {
 
   mkdir -p "$(dirname "$AUTO_LOG")" "$(dirname "$AUTO_PID_FILE")"
   echo "[agents] starting auto STT in background; log: $AUTO_LOG"
+  clear_auto_stt_ready
   nohup env \
+    VOICE_READY_FILE="$AUTO_READY_FILE" \
     VOICE_AUTO_START_AGENT_WORKBENCH=0 \
     VOICE_AUTO_TMUX_SESSION="$SESSION_NAME" \
     VOICE_AUTO_TMUX_SWITCHES="$switches" \
@@ -458,6 +524,7 @@ start_auto_stt() {
     VOICE_AUTO_FOCUS_LOG="$AUTO_FOCUS_LOG" \
     "$ROOT/run-auto.sh" >"$AUTO_LOG" 2>&1 &
   echo "$!" >"$AUTO_PID_FILE"
+  wait_for_auto_stt_ready "$!"
 }
 
 eval "$(load_workbench_config)"
@@ -476,6 +543,8 @@ VOICE_NAME="${VOICE_NAME:-$CONFIG_VOICE_NAME}"
 VOICE_DIR="${VOICE_DIR:-$CONFIG_VOICE_DIR}"
 VOICE_SESSION="${VOICE_SESSION:-${SESSION_NAME}-voice}"
 VOICE_WINDOW="${VOICE_WINDOW:-$VOICE_NAME}"
+READY_SESSION_NAME="${SESSION_NAME//[^a-zA-Z0-9_.-]/_}"
+AUTO_READY_FILE="${AUTO_READY_FILE:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-${READY_SESSION_NAME}-auto.ready}"
 
 if [[ -t 0 && "${AGENTS_CONFIG_PROMPT:-1}" != "0" && "${AGENTS_CONFIG_PROMPT:-1}" != "off" ]]; then
   echo "Saved agent workbench config: $CONFIG_PATH"

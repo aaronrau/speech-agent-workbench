@@ -35,7 +35,7 @@ DEFAULT_CONFIG = {
     "channels": 1,
     "device": None,
     "model_path": "models/vosk-model-small-en-us-0.15",
-    "transcribe_backend": "whisper",
+    "transcribe_backend": "parakeet-onnx",
     "whisper_model": "base",
     "whisper_language": None,
     "whisper_task": "transcribe",
@@ -786,6 +786,49 @@ def save_config(path, config):
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def signal_voice_ready(run_mode, transcribe_backend, model_label):
+    path = os.environ.get("VOICE_READY_FILE", "").strip()
+    if not path:
+        return
+
+    payload = {
+        "pid": os.getpid(),
+        "run_mode": run_mode,
+        "transcribe_backend": transcribe_backend,
+        "model": model_label,
+        "ready_at": time.time(),
+    }
+    directory = os.path.dirname(path)
+    tmp_path = None
+    try:
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        tmp_dir = directory or "."
+        prefix = f".{os.path.basename(path)}."
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=tmp_dir,
+            prefix=prefix,
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = handle.name
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        print(
+            f"[ready] unable to write ready file '{path}': {exc}",
+            file=sys.stderr,
+        )
 
 
 def prompt_change_saved_value(label, description, current_value):
@@ -3050,6 +3093,56 @@ def resolve_parakeet_onnx_model_alias(model_name):
     return model_name
 
 
+def get_huggingface_cache_dir():
+    try:
+        from huggingface_hub import constants as hf_constants
+
+        return (
+            os.path.expanduser(str(hf_constants.HF_HUB_CACHE)),
+            "huggingface_hub",
+        )
+    except Exception:
+        pass
+
+    cache_dir = (
+        os.environ.get("HF_HUB_CACHE")
+        or os.environ.get("HUGGINGFACE_HUB_CACHE")
+    )
+    if cache_dir:
+        return os.path.expanduser(cache_dir), "env"
+
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return os.path.join(os.path.expanduser(hf_home), "hub"), "HF_HOME"
+
+    return os.path.expanduser("~/.cache/huggingface/hub"), "default"
+
+
+def log_parakeet_onnx_download_info(model_name, resolved_model, quantization):
+    cache_dir, source = get_huggingface_cache_dir()
+    print(
+        "[transcribe] parakeet-onnx loading "
+        f"requested='{model_name}' resolved='{resolved_model}' "
+        f"quantization='{quantization}'"
+    )
+    print(
+        f"[transcribe] parakeet-onnx download/cache dir: {cache_dir} "
+        f"({source})"
+    )
+    disabled = os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS", "").strip().lower()
+    if disabled in ("1", "true", "yes", "on"):
+        print(
+            "[transcribe] Hugging Face download progress bars are disabled by "
+            "HF_HUB_DISABLE_PROGRESS_BARS.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[transcribe] download progress, if needed, is shown by onnx-asr/"
+            "Hugging Face Hub in this output."
+        )
+
+
 def load_parakeet_onnx_model(model_name, quantization):
     resolved_model = resolve_parakeet_onnx_model_alias(model_name)
     cache_key = (resolved_model, quantization)
@@ -3074,6 +3167,7 @@ def load_parakeet_onnx_model(model_name, quantization):
             f"[transcribe] parakeet-onnx alias '{resolved_model}' for '{model_name}'"
         )
 
+    log_parakeet_onnx_download_info(model_name, resolved_model, quantization)
     model = onnx_asr.load_model(resolved_model, quantization=quantization)
     PARAKEET_ONNX_MODEL_CACHE[cache_key] = model
     return model
@@ -4899,6 +4993,7 @@ def main():
         minimum=1.0,
     )
     auto_vad_detector = build_sherpa_vad(config, sample_rate)
+    signal_voice_ready(run_mode, transcribe_backend, _transcribe_model_label)
 
     def render_meter(level, width=24):
         filled = int(level * width)

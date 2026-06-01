@@ -1,8 +1,23 @@
 # speech-agent-workbench
 
-Speech Agent Workbench is a Linux voice input tool for dictation and voice-routed agent terminals. It can run as a plain speech-to-text listener or start a tmux workbench with three configurable agent panes and one voice listener pane.
+Voice control for Linux agent workspaces: speak a command, route it to the right tmux agent, and submit it without touching the keyboard.
 
-The repo includes the Silero VAD ONNX file and a Sherpa ONNX Parakeet model so the default local setup can run without downloading a speech model.
+## Features
+
+- Plain dictation mode that types text into the focused app after a trigger word.
+- Agent workbench mode that starts a tmux workspace with three configurable agent panes and one voice listener pane.
+- Voice routing by pane/window name: say `<agent name>` to switch targets or `<agent name> <message>` to send text directly to that tmux target and press Enter.
+- Configurable agent names, working directories, pane/window layout, voice pane name, trigger word, aliases, paste mode, and input devices.
+- Numeric pane names get spoken-number aliases, so a name containing `2` can be addressed as `two`.
+- Voice session shutdown with phrases like `<voice pane name> terminate session`.
+- Default local STT uses Parakeet ONNX through `onnx-asr`.
+- First-run startup creates `.venv`, installs Python requirements, checks model downloads, logs the Hugging Face cache path, and preloads Parakeet ONNX before listening starts.
+- The workbench launcher waits for STT/VAD models to finish loading before reporting the voice listener ready.
+- Optional remote STT auto-detection with local Parakeet ONNX fallback.
+- Sherpa/Silero VAD support for automatic speech detection.
+- X11 and Wayland typing support through `xdotool`/`xclip`, `wtype`, `wl-clipboard`, or `ydotool`.
+- Direct tmux send mode for agent-prefixed messages, so routed commands do not depend on desktop focus.
+- Focus and tmux-send diagnostics are written to a configurable log file.
 
 ## Install
 
@@ -18,13 +33,17 @@ To skip system packages:
 INSTALL_SYSTEM_DEPS=0 ./install.sh
 ```
 
+If `.venv` is missing, `run.sh` also creates it and installs
+`requirements.txt` before checking model downloads. Set
+`VOICE_CREATE_VENV=off` to require manual setup.
+
 ## Configure
 
 Edit `config.json`.
 
 Important fields:
 
-- `transcribe_backend`: default is `sherpa`
+- `transcribe_backend`: default is `parakeet-onnx`
 - `sherpa_model_dir`: included Parakeet ONNX model directory
 - `auto_trigger_word`: default is `agent`
 - `paste_mode`: `type`, `clipboard`, `hotkey`, or `auto`
@@ -36,6 +55,13 @@ Important fields:
 ```bash
 ./run.sh
 ```
+
+The run script defaults the local recognizer to `parakeet-onnx`. Set
+`VOICE_TRANSCRIBE_BACKEND` to choose another backend, or set
+`VOICE_DEFAULT_TRANSCRIBE_BACKEND=off` to use the value from `config.json`.
+When `parakeet-onnx` is selected, startup preloads the model so a missing model
+downloads before listening starts. Set `VOICE_PARAKEET_ONNX_DOWNLOAD=off` to
+skip that preload.
 
 Say the trigger word, then the text to type:
 
@@ -52,40 +78,26 @@ The app clicks the current mouse position, types the words after the trigger, an
 ```
 
 On interactive launch, the workbench script shows the saved agent command, pane names, and paths. Accept the defaults or update them. The values are saved in `config.json`.
-
-### Workbench Voice Functionality
-
-- Say `<agent name>` to select that configured tmux pane or window.
-- Say `<agent name> <message>` to select that tmux target, paste the message
-  directly into tmux, and press Enter. This does not depend on the desktop's
-  focused window.
-- Names are derived from `agent_workbench.agents` and
-  `agent_workbench.voice`. Numeric names also get spoken-number aliases, so a
-  configured name containing `2` can be addressed as `two`.
-- Say `<voice pane name> terminate session` to kill the configured tmux session
-  and exit the voice listener. The listener also accepts
-  `<voice pane name> terminates session`,
-  `<voice pane name> terminate sessions`, and
-  `<voice pane name> terminates sessions`.
-- Focus changes are best effort. X11 or XWayland terminals can be targeted with
-  `VOICE_AUTO_TERMINAL_WINDOW_TITLE` or `VOICE_AUTO_TERMINAL_WINDOW_ID`.
-  GNOME Wayland can block specific-window focus, so opening a new GNOME
-  Terminal is off by default.
-- Set `VOICE_AUTO_GNOME_TERMINAL_FOCUS_MODE=hotkey` to use the Terminal
-  favorite shortcut, or `VOICE_AUTO_GNOME_TERMINAL_FOCUS_MODE=launch` to open a
-  focused GNOME Terminal attached to the configured tmux session.
-- Set `VOICE_AUTO_TMUX_DIRECT_SEND=0` to fall back to desktop typing for
-  prefixed tmux messages.
-- Focus attempts and tmux direct-send attempts are logged to
-  `${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-focus.log` by default.
-  Override with `VOICE_AUTO_FOCUS_LOG=/path/to/focus.log` or disable with
-  `VOICE_AUTO_FOCUS_LOG=0`.
+When launched through `./run-auto.sh`, model downloads are checked in the foreground before tmux starts so download/cache logs are visible. Set `VOICE_AUTO_PREFETCH_MODELS=off` to skip that foreground check.
+The launcher waits for the voice listener to finish loading its STT/VAD models before it reports the session ready. Set `AUTO_READY_TIMEOUT=off` to skip that wait.
 
 ## Notes
 
 - X11 typing uses `xdotool`/`xclip`.
 - Wayland typing uses `wtype`, `wl-clipboard`, or `ydotool`.
 - If direct typing fails, set `VOICE_PASTE_MODE=clipboard`.
+- Focus changes are best effort. X11 or XWayland terminals can be targeted with
+  `VOICE_AUTO_TERMINAL_WINDOW_TITLE` or `VOICE_AUTO_TERMINAL_WINDOW_ID`.
+- GNOME Wayland can block specific-window focus. Set
+  `VOICE_AUTO_GNOME_TERMINAL_FOCUS_MODE=hotkey` to use the Terminal favorite
+  shortcut, or `VOICE_AUTO_GNOME_TERMINAL_FOCUS_MODE=launch` to open a focused
+  GNOME Terminal attached to the configured tmux session.
+- Set `VOICE_AUTO_TMUX_DIRECT_SEND=0` to fall back to desktop typing for
+  prefixed tmux messages.
+- Focus attempts and tmux direct-send attempts are logged to
+  `${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-focus.log` by default.
+  Override with `VOICE_AUTO_FOCUS_LOG=/path/to/focus.log` or disable with
+  `VOICE_AUTO_FOCUS_LOG=0`.
 - On Wayland, `ydotoold` may need to be running:
 
 ```bash

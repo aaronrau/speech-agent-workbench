@@ -10,6 +10,7 @@ VAD_URL="${VOICE_AUTO_SHERPA_VAD_URL:-https://github.com/k2-fsa/sherpa-onnx/rele
 export PYTHONUNBUFFERED=1
 export VOICE_HOTKEY_CONFIG="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
 export VOICE_REMOTE_URL="${VOICE_REMOTE_URL:-http://127.0.0.1:8765/transcribe}"
+export VOICE_DEFAULT_TRANSCRIBE_BACKEND="${VOICE_DEFAULT_TRANSCRIBE_BACKEND:-parakeet-onnx}"
 export VOICE_FALLBACK_BACKEND="${VOICE_FALLBACK_BACKEND:-parakeet-onnx}"
 export VOICE_RUN_MODE=auto
 export VOICE_AUTO_TRIGGER_WORD="${VOICE_AUTO_TRIGGER_WORD:-agent}"
@@ -58,6 +59,36 @@ check_ydotoold() {
       echo "[run] then: sudo udevadm control --reload-rules && sudo udevadm trigger" >&2
     fi
   fi
+}
+
+ensure_python_env() {
+  if [[ -x "$PYTHON_BIN" ]]; then
+    return 0
+  fi
+
+  case "${VOICE_CREATE_VENV:-1}" in
+    0|false|no|none|null|off)
+      echo "[run] Python venv missing: $PYTHON_BIN" >&2
+      echo "[run] run ./install.sh or unset VOICE_CREATE_VENV=off." >&2
+      exit 1
+      ;;
+  esac
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "[run] python3 not found. Install Python 3.9+ and retry." >&2
+    exit 1
+  fi
+
+  echo "[run] creating Python venv: $VENV_ROOT" >&2
+  if ! python3 -m venv "$VENV_ROOT"; then
+    echo "[run] unable to create venv. On Ubuntu, install python3-venv:" >&2
+    echo "[run]   sudo apt-get install -y python3-venv" >&2
+    exit 1
+  fi
+
+  echo "[run] installing Python dependencies..." >&2
+  "$PYTHON_BIN" -m pip install --upgrade pip
+  "$PYTHON_BIN" -m pip install -r "$ROOT/requirements.txt"
 }
 
 ensure_faster_whisper() {
@@ -157,6 +188,52 @@ PY
   "$PYTHON_BIN" -m pip install 'onnx-asr[cpu,hub]'
 }
 
+ensure_parakeet_onnx_model() {
+  case "${VOICE_PARAKEET_ONNX_DOWNLOAD:-1}" in
+    0|false|no|none|null|off)
+      return 0
+      ;;
+  esac
+
+  "$PYTHON_BIN" - "$ROOT" <<'PY'
+import json
+import os
+import sys
+
+root = sys.argv[1]
+sys.path.insert(0, root)
+
+
+def normalize_backend(value):
+    value = str(value or "").strip().lower()
+    if value in ("parakey", "parakeet"):
+        return "parakeet-onnx"
+    return value
+
+
+path = os.environ.get("VOICE_HOTKEY_CONFIG")
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+except Exception:
+    config = {}
+
+backend = normalize_backend(
+    os.environ.get("VOICE_TRANSCRIBE_BACKEND") or config.get("transcribe_backend")
+)
+if backend != "parakeet-onnx":
+    raise SystemExit(0)
+
+import app
+
+model_name = app.get_parakeet_onnx_model(config)
+quantization = app.get_parakeet_onnx_quantization(config)
+print("[run] ensuring parakeet-onnx model is downloaded...", flush=True)
+app.load_parakeet_onnx_model(model_name, quantization)
+print("[run] parakeet-onnx model ready.", flush=True)
+PY
+}
+
 maybe_enable_remote_backend() {
   if [ -n "${VOICE_TRANSCRIBE_BACKEND:-}" ]; then
     return 0
@@ -193,6 +270,53 @@ PY
 
   export VOICE_TRANSCRIBE_BACKEND=remote
   echo "[run] preferring remote STT at $VOICE_REMOTE_URL" >&2
+}
+
+select_default_transcribe_backend() {
+  if [ -n "${VOICE_TRANSCRIBE_BACKEND:-}" ]; then
+    return 0
+  fi
+
+  case "${VOICE_DEFAULT_TRANSCRIBE_BACKEND,,}" in
+    ""|0|false|no|none|null|off)
+      return 0
+      ;;
+  esac
+
+  local configured_backend
+  configured_backend="$("$PYTHON_BIN" - <<'PY'
+import json
+import os
+
+path = os.environ.get("VOICE_HOTKEY_CONFIG")
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+except Exception:
+    config = {}
+
+value = config.get("transcribe_backend")
+print(str(value).strip().lower() if value is not None else "")
+PY
+)"
+  case "$configured_backend" in
+    ""|whisper|sherpa|vosk|parakey|parakeet|parakeet-onnx)
+      ;;
+    *)
+      echo "[run] config backend -> ${configured_backend}" >&2
+      return 0
+      ;;
+  esac
+
+  case "${VOICE_DEFAULT_TRANSCRIBE_BACKEND,,}" in
+    parakey|parakeet)
+      export VOICE_TRANSCRIBE_BACKEND="parakeet-onnx"
+      ;;
+    *)
+      export VOICE_TRANSCRIBE_BACKEND="$VOICE_DEFAULT_TRANSCRIBE_BACKEND"
+      ;;
+  esac
+  echo "[run] default local backend -> ${VOICE_TRANSCRIBE_BACKEND}" >&2
 }
 
 log_backend_fallback() {
@@ -236,15 +360,33 @@ ensure_auto_vad_model() {
   esac
 }
 
+is_truthy() {
+  case "${1:-}" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 if is_wayland; then
   check_ydotoold
 fi
 
+ensure_python_env
+maybe_enable_remote_backend
+select_default_transcribe_backend
 ensure_faster_whisper
 ensure_nemo_canary
 ensure_parakeet_onnx
-maybe_enable_remote_backend
+ensure_parakeet_onnx_model
 log_backend_fallback
 ensure_auto_vad_model
+if is_truthy "${VOICE_PREFETCH_ONLY:-0}"; then
+  echo "[run] model prefetch complete." >&2
+  exit 0
+fi
 
 exec "$PYTHON_BIN" "$ROOT/app.py"
