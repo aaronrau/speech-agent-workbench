@@ -24,8 +24,20 @@ for candidate in (path, os.path.join(root, "config.example.json")):
         continue
 
 settings = config.get("agent_workbench") or {}
-agents = settings.get("agents") or []
-voice = settings.get("voice") or {}
+legacy_settings = config.get("codex_agents") or {}
+if not isinstance(settings, dict):
+    settings = {}
+if not isinstance(legacy_settings, dict):
+    legacy_settings = {}
+
+def get_setting(name):
+    value = settings.get(name)
+    if value in (None, ""):
+        value = legacy_settings.get(name)
+    return value or ""
+
+agents = settings.get("agents") or legacy_settings.get("agents") or []
+voice = settings.get("voice") or legacy_settings.get("voice") or {}
 
 def item_name(items, index):
     if len(items) > index and isinstance(items[index], dict):
@@ -33,9 +45,9 @@ def item_name(items, index):
     return ""
 
 values = {
-    "CONFIG_SESSION_NAME": settings.get("session_name") or "",
-    "CONFIG_AGENT_LAYOUT": settings.get("layout") or "",
-    "CONFIG_PANES_WINDOW": settings.get("panes_window") or "",
+    "CONFIG_SESSION_NAME": get_setting("session_name"),
+    "CONFIG_AGENT_LAYOUT": get_setting("layout"),
+    "CONFIG_PANES_WINDOW": get_setting("panes_window"),
     "CONFIG_AGENT1_NAME": item_name(agents, 0),
     "CONFIG_AGENT2_NAME": item_name(agents, 1),
     "CONFIG_AGENT3_NAME": item_name(agents, 2),

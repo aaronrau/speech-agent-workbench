@@ -83,8 +83,20 @@ try:
 except Exception:
     config = {}
 settings = config.get("agent_workbench") or {}
-agents = settings.get("agents") or []
-voice = settings.get("voice") or {}
+legacy_settings = config.get("codex_agents") or {}
+if not isinstance(settings, dict):
+    settings = {}
+if not isinstance(legacy_settings, dict):
+    legacy_settings = {}
+
+def get_setting(name, default=None, legacy_name=None):
+    value = settings.get(name)
+    if value in (None, ""):
+        value = legacy_settings.get(legacy_name or name)
+    return default if value in (None, "") else value
+
+agents = settings.get("agents") or legacy_settings.get("agents") or []
+voice = settings.get("voice") or legacy_settings.get("voice") or {}
 
 def agent(index):
     item = agents[index] if len(agents) > index and isinstance(agents[index], dict) else {}
@@ -95,10 +107,12 @@ def agent(index):
     }
 
 values = {
-    "CONFIG_SESSION_NAME": settings.get("session_name") or defaults["session_name"],
-    "CONFIG_AGENT_LAYOUT": settings.get("layout") or defaults["layout"],
-    "CONFIG_PANES_WINDOW": settings.get("panes_window") or defaults["panes_window"],
-    "CONFIG_AGENT_COMMAND": settings.get("agent_command") or defaults["agent_command"],
+    "CONFIG_SESSION_NAME": get_setting("session_name", defaults["session_name"]),
+    "CONFIG_AGENT_LAYOUT": get_setting("layout", defaults["layout"]),
+    "CONFIG_PANES_WINDOW": get_setting("panes_window", defaults["panes_window"]),
+    "CONFIG_AGENT_COMMAND": get_setting(
+        "agent_command", defaults["agent_command"], legacy_name="codex_command"
+    ),
     "CONFIG_AGENT1_NAME": agent(0)["name"],
     "CONFIG_AGENT1_DIR": agent(0)["path"],
     "CONFIG_AGENT2_NAME": agent(1)["name"],
