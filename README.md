@@ -33,9 +33,10 @@ To skip system packages:
 INSTALL_SYSTEM_DEPS=0 ./install.sh
 ```
 
-If `.venv` is missing, `run.sh` also creates it and installs
-`requirements.txt` before checking model downloads. Set
-`VOICE_CREATE_VENV=off` to require manual setup.
+If `.venv` is missing or missing core runtime packages, `run.sh` creates it
+and installs the default Parakeet runtime dependencies before checking model
+downloads. Set `VOICE_INSTALL_FULL_REQUIREMENTS=1` to install every backend in
+`requirements.txt`, or `VOICE_CREATE_VENV=off` to require manual venv creation.
 
 ## Configure
 

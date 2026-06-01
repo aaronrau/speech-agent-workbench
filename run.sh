@@ -62,33 +62,64 @@ check_ydotoold() {
 }
 
 ensure_python_env() {
-  if [[ -x "$PYTHON_BIN" ]]; then
-    return 0
-  fi
+  local install_requirements=0
 
-  case "${VOICE_CREATE_VENV:-1}" in
-    0|false|no|none|null|off)
-      echo "[run] Python venv missing: $PYTHON_BIN" >&2
-      echo "[run] run ./install.sh or unset VOICE_CREATE_VENV=off." >&2
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    case "${VOICE_CREATE_VENV:-1}" in
+      0|false|no|none|null|off)
+        echo "[run] Python venv missing: $PYTHON_BIN" >&2
+        echo "[run] run ./install.sh or unset VOICE_CREATE_VENV=off." >&2
+        exit 1
+        ;;
+    esac
+
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "[run] python3 not found. Install Python 3.9+ and retry." >&2
       exit 1
-      ;;
-  esac
+    fi
 
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "[run] python3 not found. Install Python 3.9+ and retry." >&2
-    exit 1
+    echo "[run] creating Python venv: $VENV_ROOT" >&2
+    if ! python3 -m venv "$VENV_ROOT"; then
+      echo "[run] unable to create venv. On Ubuntu, install python3-venv:" >&2
+      echo "[run]   sudo apt-get install -y python3-venv" >&2
+      exit 1
+    fi
+    install_requirements=1
   fi
 
-  echo "[run] creating Python venv: $VENV_ROOT" >&2
-  if ! python3 -m venv "$VENV_ROOT"; then
-    echo "[run] unable to create venv. On Ubuntu, install python3-venv:" >&2
-    echo "[run]   sudo apt-get install -y python3-venv" >&2
-    exit 1
+  if [[ "$install_requirements" != "1" ]]; then
+    if ! "$PYTHON_BIN" - <<'PY'
+import importlib.util
+import sys
+
+required = ("numpy", "sounddevice", "pynput", "onnx_asr", "sherpa_onnx")
+missing = [name for name in required if importlib.util.find_spec(name) is None]
+if missing:
+    print("[run] missing Python dependencies: " + ", ".join(missing), file=sys.stderr)
+    raise SystemExit(1)
+PY
+    then
+      install_requirements=1
+    fi
   fi
 
-  echo "[run] installing Python dependencies..." >&2
-  "$PYTHON_BIN" -m pip install --upgrade pip
-  "$PYTHON_BIN" -m pip install -r "$ROOT/requirements.txt"
+  if [[ "$install_requirements" == "1" ]]; then
+    echo "[run] installing default Python runtime dependencies..." >&2
+    "$PYTHON_BIN" -m pip install --upgrade pip
+    case "${VOICE_INSTALL_FULL_REQUIREMENTS:-0}" in
+      1|true|yes|on)
+        "$PYTHON_BIN" -m pip install -r "$ROOT/requirements.txt"
+        ;;
+      *)
+        "$PYTHON_BIN" -m pip install \
+          numpy \
+          sounddevice \
+          pynput \
+          'onnx-asr[cpu,hub]' \
+          sherpa-onnx
+        ;;
+    esac
+  fi
 }
 
 ensure_faster_whisper() {
