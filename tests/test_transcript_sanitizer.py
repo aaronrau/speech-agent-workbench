@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -5,16 +6,20 @@ from unittest import mock
 
 from app import (
     append_transcript_history,
+    arm_auto_trigger_session,
     build_auto_tmux_switch_commands,
     build_sherpa_vad,
     extract_text_after_trigger_word,
     format_colored_detection_words,
     get_transcript_history_path,
+    is_auto_trigger_session_armed,
     is_likely_bad_transcript,
+    make_auto_trigger_session,
     match_auto_shell_command,
     match_auto_shell_command_prefix,
     normalize_voice_command_text,
     parse_word_list,
+    reset_auto_trigger_session,
     sanitize_transcript_text,
     split_trailing_submit_command,
 )
@@ -67,9 +72,14 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             ("submit this", True),
         )
 
-    def test_extract_text_after_trigger_word_keeps_words_after_trigger(self):
+    def test_extract_text_after_trigger_word_requires_trigger_at_start(self):
+        self.assertIsNone(
+            extract_text_after_trigger_word("ignore this agent create issue", "agent")
+        )
+
+    def test_extract_text_after_trigger_word_keeps_words_after_start_trigger(self):
         self.assertEqual(
-            extract_text_after_trigger_word("ignore this agent create issue", "agent"),
+            extract_text_after_trigger_word("agent create issue", "agent"),
             "create issue",
         )
 
@@ -90,16 +100,50 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         )
 
     def test_extract_text_after_trigger_word_allows_no_queued_text(self):
-        self.assertEqual(extract_text_after_trigger_word("submit agent.", "agent"), "")
+        self.assertEqual(extract_text_after_trigger_word("agent.", "agent"), "")
 
-    def test_extract_text_after_trigger_word_accepts_aliases(self):
-        self.assertEqual(
+    def test_extract_text_after_trigger_word_ignores_aliases(self):
+        self.assertIsNone(
             extract_text_after_trigger_word("assistant create issue", "agent", ["assistant"]),
-            "create issue",
         )
 
     def test_parse_word_list_accepts_comma_separated_aliases(self):
         self.assertEqual(parse_word_list("assistant, helper, assistant"), ["assistant", "helper"])
+
+    def test_auto_trigger_session_expires_stale_armed_state(self):
+        session = make_auto_trigger_session()
+
+        arm_auto_trigger_session(session, "trigger_only", now=10.0)
+
+        self.assertFalse(is_auto_trigger_session_armed(session, 8.0, now=18.1))
+        self.assertFalse(session["armed"])
+        self.assertFalse(session["clicked"])
+        self.assertIsNone(session["source"])
+
+    def test_auto_trigger_session_keeps_recent_armed_state(self):
+        session = make_auto_trigger_session()
+
+        arm_auto_trigger_session(session, "trigger_only", now=10.0)
+
+        self.assertTrue(is_auto_trigger_session_armed(session, 8.0, now=17.9))
+        self.assertTrue(session["armed"])
+        self.assertEqual(session["source"], "trigger_only")
+
+    def test_auto_trigger_session_timeout_zero_disarms(self):
+        session = make_auto_trigger_session()
+
+        arm_auto_trigger_session(session, "trigger_only", now=10.0)
+
+        self.assertFalse(is_auto_trigger_session_armed(session, 0.0, now=10.1))
+        self.assertFalse(session["armed"])
+
+    def test_reset_auto_trigger_session_clears_metadata(self):
+        session = make_auto_trigger_session()
+        arm_auto_trigger_session(session, "probe", now=10.0)
+
+        reset_auto_trigger_session(session)
+
+        self.assertEqual(session, make_auto_trigger_session())
 
     def test_normalize_voice_command_text_keeps_command_words(self):
         self.assertEqual(
@@ -129,6 +173,10 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             commands["agent two"]["argv"],
             ["tmux", "select-window", "-t", "speech-agent-workbench:Agent 2"],
         )
+        self.assertEqual(
+            commands["agent two"]["tmux_send_target"],
+            "speech-agent-workbench:Agent 2",
+        )
 
     def test_auto_tmux_switch_commands_accept_pane_targets(self):
         with mock.patch.dict(
@@ -154,6 +202,10 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 "speech-agent-workbench:Workbench.2",
             ],
         )
+        self.assertEqual(
+            commands["agent three"]["tmux_send_target"],
+            "speech-agent-workbench:Workbench.2",
+        )
 
     def test_auto_tmux_switch_commands_accept_pane_id_targets(self):
         with mock.patch.dict(
@@ -170,6 +222,37 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             commands["agent two"]["argv"],
             ["tmux", "select-pane", "-t", "%12"],
         )
+        self.assertEqual(commands["agent two"]["tmux_send_target"], "%12")
+
+    def test_auto_tmux_switch_commands_include_configured_terminate_commands(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "VOICE_AUTO_TMUX_SESSION": "speech-agent-workbench",
+                "VOICE_AUTO_TMUX_SWITCHES": "voice=pane:%4",
+                "VOICE_AUTO_TMUX_TERMINATE_WORDS": (
+                    "voice terminate session,voice terminates session,"
+                    "voice terminate sessions,voice terminates sessions"
+                ),
+            },
+            clear=True,
+        ):
+            commands = build_auto_tmux_switch_commands({})
+
+        command = commands["voice terminate session"]
+        self.assertEqual(
+            command["argv"],
+            ["tmux", "kill-session", "-t", "speech-agent-workbench"],
+        )
+        self.assertNotIn("tmux_send_target", command)
+        self.assertTrue(command["exit_after"])
+        for label in (
+            "voice terminates session",
+            "voice terminate sessions",
+            "voice terminates sessions",
+        ):
+            self.assertEqual(commands[label]["argv"], command["argv"])
+            self.assertTrue(commands[label]["exit_after"])
 
     def test_match_auto_shell_command_accepts_exact_switch_word(self):
         commands = {"agent two": {"label": "agent two", "argv": ["tmux"]}}
@@ -225,6 +308,135 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 commands,
             ),
             (commands["workspace"], "do you have the latest changes"),
+        )
+
+    def test_focus_auto_terminal_window_does_not_launch_terminal_by_default_on_gnome_wayland(self):
+        calls = []
+
+        def fake_which(name):
+            if name in ("gdbus", "gnome-terminal"):
+                return f"/usr/bin/{name}"
+            return None
+
+        def fake_run_command(argv, input_text=None, timeout=None):
+            calls.append(argv)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = os.path.join(tmp_dir, "focus.log")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "DESKTOP_SESSION": "ubuntu",
+                    "VOICE_AUTO_FOCUS_LOG": log_path,
+                    "VOICE_AUTO_REFOCUS_DELAY": "0",
+                    "VOICE_AUTO_TMUX_SESSION": "speech-agent-workbench",
+                    "XDG_CURRENT_DESKTOP": "ubuntu:GNOME",
+                    "XDG_SESSION_TYPE": "wayland",
+                },
+                clear=True,
+            ):
+                with mock.patch.object(app.shutil, "which", side_effect=fake_which):
+                    with mock.patch.object(app, "run_command", side_effect=fake_run_command):
+                        self.assertFalse(app.focus_auto_terminal_window())
+
+            with open(log_path, "r", encoding="utf-8") as handle:
+                records = [json.loads(line) for line in handle]
+
+        self.assertNotIn("gnome-terminal", [call[0] for call in calls])
+        self.assertEqual(records[-2]["method"], "gnome-focus-mode")
+        self.assertEqual(records[-2]["target"], "off")
+        self.assertFalse(records[-1]["success"])
+
+    def test_focus_auto_terminal_window_launches_terminal_when_enabled_on_gnome_wayland(self):
+        calls = []
+
+        def fake_which(name):
+            if name == "gnome-terminal":
+                return f"/usr/bin/{name}"
+            return None
+
+        def fake_run_command(argv, input_text=None, timeout=None):
+            calls.append(argv)
+            if argv[:2] == ["tmux", "has-session"]:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if argv[:2] == ["gnome-terminal", "--title"]:
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=1, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = os.path.join(tmp_dir, "focus.log")
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "DESKTOP_SESSION": "ubuntu",
+                    "VOICE_AUTO_FOCUS_LOG": log_path,
+                    "VOICE_AUTO_GNOME_TERMINAL_FOCUS_MODE": "launch",
+                    "VOICE_AUTO_REFOCUS_DELAY": "0",
+                    "VOICE_AUTO_TMUX_SESSION": "speech-agent-workbench",
+                    "XDG_CURRENT_DESKTOP": "ubuntu:GNOME",
+                    "XDG_SESSION_TYPE": "wayland",
+                },
+                clear=True,
+            ):
+                with mock.patch.object(app.shutil, "which", side_effect=fake_which):
+                    with mock.patch.object(app, "run_command", side_effect=fake_run_command):
+                        self.assertTrue(app.focus_auto_terminal_window())
+
+            with open(log_path, "r", encoding="utf-8") as handle:
+                records = [json.loads(line) for line in handle]
+
+        self.assertIn(
+            [
+                "gnome-terminal",
+                "--title",
+                "speech-agent-workbench",
+                "--",
+                "tmux",
+                "attach-session",
+                "-t",
+                "speech-agent-workbench",
+            ],
+            calls,
+        )
+        self.assertEqual(records[-1]["method"], "gnome-terminal-launch")
+        self.assertTrue(records[-1]["success"])
+
+    def test_send_text_to_tmux_target_pastes_buffer_and_enters(self):
+        calls = []
+
+        def fake_which(name):
+            return "/usr/bin/tmux" if name == "tmux" else None
+
+        def fake_run_command(argv, input_text=None, timeout=None):
+            calls.append(argv)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.dict("os.environ", {"VOICE_SUBMIT_ENTER_DELAY": "0"}):
+            with mock.patch.object(app.shutil, "which", side_effect=fake_which):
+                with mock.patch.object(app, "run_command", side_effect=fake_run_command):
+                    self.assertTrue(
+                        app.send_text_to_tmux_target(
+                            {"label": "agent two", "tmux_send_target": "%1"},
+                            "-starts with dash",
+                        )
+                    )
+
+        buffer_name = f"voice-workbench-{os.getpid()}"
+        self.assertEqual(
+            calls,
+            [
+                [
+                    "tmux",
+                    "set-buffer",
+                    "-b",
+                    buffer_name,
+                    "--",
+                    "-starts with dash",
+                ],
+                ["tmux", "paste-buffer", "-d", "-b", buffer_name, "-t", "%1"],
+                ["tmux", "send-keys", "-t", "%1", "C-m"],
+            ],
         )
 
     def test_append_transcript_history_appends_successful_text(self):

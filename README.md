@@ -53,7 +53,33 @@ The app clicks the current mouse position, types the words after the trigger, an
 
 On interactive launch, the workbench script shows the saved agent command, pane names, and paths. Accept the defaults or update them. The values are saved in `config.json`.
 
-Say an agent pane name to focus it. Say a pane name followed by a message to switch there and submit the message.
+### Workbench Voice Functionality
+
+- Say `<agent name>` to select that configured tmux pane or window.
+- Say `<agent name> <message>` to select that tmux target, paste the message
+  directly into tmux, and press Enter. This does not depend on the desktop's
+  focused window.
+- Names are derived from `agent_workbench.agents` and
+  `agent_workbench.voice`. Numeric names also get spoken-number aliases, so a
+  configured name containing `2` can be addressed as `two`.
+- Say `<voice pane name> terminate session` to kill the configured tmux session
+  and exit the voice listener. The listener also accepts
+  `<voice pane name> terminates session`,
+  `<voice pane name> terminate sessions`, and
+  `<voice pane name> terminates sessions`.
+- Focus changes are best effort. X11 or XWayland terminals can be targeted with
+  `VOICE_AUTO_TERMINAL_WINDOW_TITLE` or `VOICE_AUTO_TERMINAL_WINDOW_ID`.
+  GNOME Wayland can block specific-window focus, so opening a new GNOME
+  Terminal is off by default.
+- Set `VOICE_AUTO_GNOME_TERMINAL_FOCUS_MODE=hotkey` to use the Terminal
+  favorite shortcut, or `VOICE_AUTO_GNOME_TERMINAL_FOCUS_MODE=launch` to open a
+  focused GNOME Terminal attached to the configured tmux session.
+- Set `VOICE_AUTO_TMUX_DIRECT_SEND=0` to fall back to desktop typing for
+  prefixed tmux messages.
+- Focus attempts and tmux direct-send attempts are logged to
+  `${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-focus.log` by default.
+  Override with `VOICE_AUTO_FOCUS_LOG=/path/to/focus.log` or disable with
+  `VOICE_AUTO_FOCUS_LOG=0`.
 
 ## Notes
 

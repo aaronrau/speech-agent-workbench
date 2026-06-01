@@ -1,3 +1,4 @@
+import ast
 import bisect
 import gc
 import json
@@ -84,9 +85,11 @@ DEFAULT_CONFIG = {
     "auto_trigger_probe_seconds": 0.5,
     "auto_trigger_min_probe_seconds": 1.0,
     "auto_trigger_probe_window_seconds": 1.5,
+    "auto_trigger_arm_timeout_seconds": 8.0,
     "auto_trigger_aliases": [],
     "auto_tmux_switch_session": None,
     "auto_tmux_switch_words": {},
+    "auto_tmux_terminate_words": [],
     "submit_enter_delay_seconds": 0.5,
     "transcript_history_path": "transcript-history.txt",
 }
@@ -97,6 +100,7 @@ PASTE_IN_PROGRESS = threading.Event()
 PASTE_DEBUG_DEFAULT = False
 PASTE_DELAY_DEFAULT = 0.1
 PASTE_MODE_DEFAULT = "type"
+AUTO_REFOCUS_DELAY_DEFAULT = 0.05
 WHISPER_MODEL_CACHE = {}
 FASTER_WHISPER_MODEL_CACHE = {}
 NEMO_MODEL_CACHE = {}
@@ -152,18 +156,53 @@ def split_trailing_submit_command(text):
 
 
 def extract_text_after_trigger_word(text, trigger_word, aliases=None):
-    triggers = [str(trigger_word or "").strip()]
-    triggers.extend(str(alias or "").strip() for alias in (aliases or []))
-    triggers = [trigger for trigger in triggers if trigger]
-    if not text or not triggers:
+    trigger = str(trigger_word or "").strip()
+    if not text or not trigger:
         return None
     stripped = str(text).strip()
-    alternatives = "|".join(re.escape(trigger) for trigger in triggers)
-    pattern = rf"(?i)(?:^|\s)(?:{alternatives})[.+]*(?:\s|$)"
+    pattern = rf"(?i)^{re.escape(trigger)}[.+]*(?:\s|$)"
     match = re.search(pattern, stripped)
     if not match:
         return None
     return stripped[match.end() :].strip()
+
+
+def make_auto_trigger_session():
+    return {
+        "armed": False,
+        "clicked": False,
+        "armed_at": None,
+        "source": None,
+    }
+
+
+def arm_auto_trigger_session(session, source, now=None):
+    session["armed"] = True
+    session["clicked"] = True
+    session["armed_at"] = time.monotonic() if now is None else now
+    session["source"] = source
+
+
+def reset_auto_trigger_session(session):
+    session["armed"] = False
+    session["clicked"] = False
+    session["armed_at"] = None
+    session["source"] = None
+
+
+def is_auto_trigger_session_armed(session, timeout_seconds, now=None):
+    if not session.get("armed"):
+        return False
+    timeout = max(0.0, float(timeout_seconds or 0.0))
+    if timeout <= 0.0:
+        reset_auto_trigger_session(session)
+        return False
+    armed_at = session.get("armed_at")
+    current = time.monotonic() if now is None else now
+    if armed_at is None or current - float(armed_at) > timeout:
+        reset_auto_trigger_session(session)
+        return False
+    return True
 
 
 def parse_word_list(value):
@@ -248,8 +287,10 @@ def build_auto_tmux_switch_commands(config):
         if not normalized:
             continue
         target_name = str(target_name or "").strip()
+        tmux_send_target = None
         if target_name.startswith("pane:"):
             pane_target = target_name[5:]
+            tmux_send_target = pane_target
             if pane_target.startswith("%"):
                 argv = ["tmux", "select-pane", "-t", pane_target]
             else:
@@ -265,10 +306,29 @@ def build_auto_tmux_switch_commands(config):
                     pane_target,
                 ]
         else:
-            argv = ["tmux", "select-window", "-t", f"{session}:{target_name}"]
+            tmux_send_target = f"{session}:{target_name}"
+            argv = ["tmux", "select-window", "-t", tmux_send_target]
         commands[normalized] = {
             "label": spoken_name,
             "argv": argv,
+            "tmux_send_target": tmux_send_target,
+        }
+
+    terminate_value = os.environ.get("VOICE_AUTO_TMUX_TERMINATE_WORDS")
+    if terminate_value is None:
+        terminate_value = config.get(
+            "auto_tmux_terminate_words",
+            DEFAULT_CONFIG["auto_tmux_terminate_words"],
+        )
+    for spoken_name in parse_word_list(terminate_value):
+        normalized = normalize_voice_command_text(spoken_name)
+        if not normalized:
+            continue
+        commands[normalized] = {
+            "label": spoken_name,
+            "argv": ["tmux", "kill-session", "-t", session],
+            "success_message": f"[auto] terminating tmux session: {session}",
+            "exit_after": True,
         }
     return commands
 
@@ -3331,6 +3391,24 @@ def run_command(argv, input_text=None, timeout=None):
     )
 
 
+def get_env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        return bool(default)
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def get_env_float(name, default, minimum=0.0):
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return float(default)
+    try:
+        parsed = float(value)
+    except ValueError:
+        return float(default)
+    return max(float(minimum), parsed)
+
+
 def paste_debug_enabled():
     value = os.environ.get("VOICE_PASTE_DEBUG", "")
     if value.strip():
@@ -3341,6 +3419,642 @@ def paste_debug_enabled():
 def log_paste_debug(message):
     if paste_debug_enabled():
         print(f"[paste] {message}")
+
+
+def get_auto_focus_log_path():
+    value = os.environ.get("VOICE_AUTO_FOCUS_LOG", "").strip()
+    if not value or value.lower() in ("0", "false", "no", "off"):
+        return None
+    return os.path.expanduser(value)
+
+
+def summarize_log_text(value, limit=400):
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def append_auto_focus_log(event, **fields):
+    path = get_auto_focus_log_path()
+    if not path:
+        return False
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "event": event,
+    }
+    record.update(fields)
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            json.dump(record, handle, sort_keys=True)
+            handle.write("\n")
+        return True
+    except OSError as exc:
+        print(f"[auto] unable to write focus log {path}: {exc}", file=sys.stderr)
+        return False
+
+
+def get_tmux_client_pid():
+    if not shutil.which("tmux"):
+        return None
+    try:
+        result = run_command(
+            ["tmux", "display-message", "-p", "#{client_pid}"],
+            timeout=0.5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    pid = (result.stdout or "").strip().splitlines()
+    if not pid:
+        return None
+    pid = pid[0].strip()
+    return pid if pid.isdigit() else None
+
+
+def find_x11_window_by_pid(pid):
+    if not pid or not shutil.which("xdotool"):
+        return None
+    try:
+        result = run_command(["xdotool", "search", "--pid", str(pid)], timeout=1.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    windows = [line.strip() for line in (result.stdout or "").splitlines()]
+    windows = [window for window in windows if window]
+    if not windows:
+        return None
+    return windows[-1]
+
+
+def focus_x11_window(window_id):
+    window_id = str(window_id or "").strip()
+    if not window_id:
+        append_auto_focus_log(
+            "focus-x11-command",
+            error="empty-window-id",
+            success=False,
+        )
+        return False
+    if not shutil.which("xdotool"):
+        append_auto_focus_log(
+            "focus-x11-command",
+            error="xdotool-not-found",
+            target=window_id,
+            success=False,
+        )
+        return False
+    commands = (
+        ["xdotool", "windowactivate", "--sync", window_id],
+        ["xdotool", "windowactivate", window_id],
+    )
+    for argv in commands:
+        try:
+            result = run_command(argv, timeout=1.0)
+        except subprocess.TimeoutExpired:
+            append_auto_focus_log(
+                "focus-x11-command",
+                argv=argv,
+                error="timeout",
+                target=window_id,
+                success=False,
+            )
+            continue
+        except OSError as exc:
+            append_auto_focus_log(
+                "focus-x11-command",
+                argv=argv,
+                error=str(exc),
+                target=window_id,
+                success=False,
+            )
+            continue
+        append_auto_focus_log(
+            "focus-x11-command",
+            argv=argv,
+            returncode=result.returncode,
+            stderr=summarize_log_text(result.stderr),
+            stdout=summarize_log_text(result.stdout),
+            success=result.returncode == 0,
+            target=window_id,
+        )
+        if result.returncode == 0:
+            delay = get_env_float(
+                "VOICE_AUTO_REFOCUS_DELAY",
+                AUTO_REFOCUS_DELAY_DEFAULT,
+                minimum=0.0,
+            )
+            if delay:
+                time.sleep(delay)
+            return True
+    return False
+
+
+def focus_window_by_title(title):
+    title = str(title or "").strip()
+    if not title:
+        return False
+    if shutil.which("wmctrl"):
+        try:
+            result = run_command(["wmctrl", "-a", title], timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is not None and result.returncode == 0:
+            return True
+    if not shutil.which("xdotool"):
+        return False
+    try:
+        result = run_command(["xdotool", "search", "--name", title], timeout=1.0)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    windows = [line.strip() for line in (result.stdout or "").splitlines()]
+    windows = [window for window in windows if window]
+    if not windows:
+        return False
+    return focus_x11_window(windows[-1])
+
+
+def is_gnome_desktop():
+    values = (
+        os.environ.get("XDG_CURRENT_DESKTOP", ""),
+        os.environ.get("DESKTOP_SESSION", ""),
+    )
+    return any("gnome" in value.lower() or "ubuntu" in value.lower() for value in values)
+
+
+def focus_gnome_app(app_id):
+    app_id = str(app_id or "").strip()
+    if not app_id or not shutil.which("gdbus"):
+        return False
+    try:
+        result = run_command(
+            [
+                "gdbus",
+                "call",
+                "--session",
+                "--dest",
+                "org.gnome.Shell",
+                "--object-path",
+                "/org/gnome/Shell",
+                "--method",
+                "org.gnome.Shell.FocusApp",
+                app_id,
+            ],
+            timeout=1.0,
+        )
+    except subprocess.TimeoutExpired:
+        append_auto_focus_log(
+            "focus-gnome-app",
+            app_id=app_id,
+            error="timeout",
+            success=False,
+        )
+        return False
+    except OSError as exc:
+        append_auto_focus_log(
+            "focus-gnome-app",
+            app_id=app_id,
+            error=str(exc),
+            success=False,
+        )
+        return False
+    append_auto_focus_log(
+        "focus-gnome-app",
+        app_id=app_id,
+        returncode=result.returncode,
+        stderr=summarize_log_text(result.stderr),
+        stdout=summarize_log_text(result.stdout),
+        success=result.returncode == 0,
+    )
+    return result.returncode == 0
+
+
+def get_gnome_favorite_apps():
+    if not shutil.which("gsettings"):
+        return []
+    try:
+        result = run_command(
+            ["gsettings", "get", "org.gnome.shell", "favorite-apps"],
+            timeout=1.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        append_auto_focus_log(
+            "focus-gnome-favorites",
+            returncode=result.returncode,
+            stderr=summarize_log_text(result.stderr),
+            stdout=summarize_log_text(result.stdout),
+            success=False,
+        )
+        return []
+    try:
+        apps = ast.literal_eval((result.stdout or "").strip())
+    except (SyntaxError, ValueError):
+        append_auto_focus_log(
+            "focus-gnome-favorites",
+            error="parse-failed",
+            stdout=summarize_log_text(result.stdout),
+            success=False,
+        )
+        return []
+    if not isinstance(apps, list):
+        return []
+    return [str(app) for app in apps]
+
+
+def get_gnome_favorite_hotkey(app_id):
+    configured = os.environ.get("VOICE_AUTO_FOCUS_HOTKEY", "").strip()
+    if configured:
+        if configured.lower() in ("0", "false", "no", "off"):
+            return None
+        return configured
+
+    index_value = os.environ.get("VOICE_AUTO_GNOME_FAVORITE_INDEX", "").strip()
+    if index_value.isdigit():
+        index = int(index_value)
+        if 1 <= index <= 9:
+            return f"super+{index}"
+
+    favorites = get_gnome_favorite_apps()
+    if not favorites:
+        return None
+    try:
+        index = favorites.index(app_id) + 1
+    except ValueError:
+        return None
+    if 1 <= index <= 9:
+        return f"super+{index}"
+    return None
+
+
+def get_gnome_terminal_focus_mode():
+    value = os.environ.get("VOICE_AUTO_GNOME_TERMINAL_FOCUS_MODE", "").strip().lower()
+    if value in ("off", "none", "disabled", "disable"):
+        return "off"
+    if value in ("app", "hotkey", "launch", "launch-first", "hotkey-first"):
+        return value
+    return "off"
+
+
+def ydotoold_is_running():
+    if not shutil.which("pgrep"):
+        return False
+    try:
+        result = run_command(["pgrep", "-x", "ydotoold"], timeout=0.5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def ensure_ydotoold_running():
+    if ydotoold_is_running():
+        append_auto_focus_log("focus-ydotoold", action="already-running", success=True)
+        return True
+    if not shutil.which("ydotoold"):
+        append_auto_focus_log(
+            "focus-ydotoold",
+            action="start",
+            error="ydotoold-not-found",
+            success=False,
+        )
+        return False
+    socket_path = "/tmp/.ydotool_socket"
+    try:
+        if os.path.exists(socket_path):
+            os.unlink(socket_path)
+    except OSError as exc:
+        append_auto_focus_log(
+            "focus-ydotoold",
+            action="remove-stale-socket",
+            error=str(exc),
+            success=False,
+        )
+    log_path = os.environ.get("VOICE_YDOTOOLD_LOG", "/tmp/ydotoold-workbench.log")
+    try:
+        log_handle = open(log_path, "ab")
+        subprocess.Popen(
+            ["ydotoold"],
+            stdout=log_handle,
+            stderr=log_handle,
+            start_new_session=True,
+        )
+        log_handle.close()
+    except OSError as exc:
+        append_auto_focus_log(
+            "focus-ydotoold",
+            action="start",
+            error=str(exc),
+            success=False,
+        )
+        return False
+    time.sleep(0.2)
+    success = ydotoold_is_running()
+    append_auto_focus_log(
+        "focus-ydotoold",
+        action="start",
+        log_path=log_path,
+        success=success,
+    )
+    return success
+
+
+def focus_with_hotkey(hotkey):
+    hotkey = str(hotkey or "").strip()
+    if not hotkey:
+        return False
+    if not shutil.which("ydotool"):
+        append_auto_focus_log(
+            "focus-hotkey",
+            error="ydotool-not-found",
+            hotkey=hotkey,
+            success=False,
+        )
+        return False
+    ensure_ydotoold_running()
+    try:
+        result = run_command(["ydotool", "key", hotkey], timeout=1.0)
+    except subprocess.TimeoutExpired:
+        append_auto_focus_log(
+            "focus-hotkey",
+            error="timeout",
+            hotkey=hotkey,
+            success=False,
+        )
+        return False
+    except OSError as exc:
+        append_auto_focus_log(
+            "focus-hotkey",
+            error=str(exc),
+            hotkey=hotkey,
+            success=False,
+        )
+        return False
+    detail = f"{result.stderr or ''}\n{result.stdout or ''}".lower()
+    backend_available = "backend unavailable" not in detail
+    success = result.returncode == 0 and backend_available
+    append_auto_focus_log(
+        "focus-hotkey",
+        hotkey=hotkey,
+        returncode=result.returncode,
+        stderr=summarize_log_text(result.stderr),
+        stdout=summarize_log_text(result.stdout),
+        success=success,
+    )
+    if success:
+        delay = get_env_float(
+            "VOICE_AUTO_REFOCUS_DELAY",
+            AUTO_REFOCUS_DELAY_DEFAULT,
+            minimum=0.0,
+        )
+        if delay:
+            time.sleep(delay)
+        return True
+    return False
+
+
+def focus_gnome_terminal_launch():
+    if not is_gnome_desktop():
+        return False
+    if not get_env_flag("VOICE_AUTO_GNOME_TERMINAL_LAUNCH_FALLBACK", default=True):
+        append_auto_focus_log(
+            "focus-gnome-terminal-launch",
+            error="disabled",
+            success=False,
+        )
+        return False
+    terminal_command = os.environ.get(
+        "VOICE_AUTO_GNOME_TERMINAL_COMMAND",
+        "gnome-terminal",
+    ).strip()
+    if not terminal_command or not shutil.which(terminal_command):
+        append_auto_focus_log(
+            "focus-gnome-terminal-launch",
+            error="terminal-command-not-found",
+            terminal_command=terminal_command,
+            success=False,
+        )
+        return False
+    session = os.environ.get("VOICE_AUTO_TMUX_SESSION", "").strip()
+    if session:
+        try:
+            tmux_result = run_command(["tmux", "has-session", "-t", session], timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            append_auto_focus_log(
+                "focus-gnome-terminal-launch",
+                error=str(exc),
+                session=session,
+                success=False,
+            )
+            return False
+        if tmux_result.returncode != 0:
+            append_auto_focus_log(
+                "focus-gnome-terminal-launch",
+                returncode=tmux_result.returncode,
+                session=session,
+                stderr=summarize_log_text(tmux_result.stderr),
+                stdout=summarize_log_text(tmux_result.stdout),
+                success=False,
+            )
+            return False
+        terminal_title = os.environ.get(
+            "VOICE_AUTO_TERMINAL_TITLE",
+            session,
+        )
+        argv = [
+            terminal_command,
+            "--title",
+            terminal_title,
+            "--",
+            "tmux",
+            "attach-session",
+            "-t",
+            session,
+        ]
+    else:
+        argv = [terminal_command]
+    try:
+        result = run_command(argv, timeout=2.0)
+    except subprocess.TimeoutExpired:
+        append_auto_focus_log(
+            "focus-gnome-terminal-launch",
+            argv=argv,
+            error="timeout",
+            success=False,
+        )
+        return False
+    except OSError as exc:
+        append_auto_focus_log(
+            "focus-gnome-terminal-launch",
+            argv=argv,
+            error=str(exc),
+            success=False,
+        )
+        return False
+    append_auto_focus_log(
+        "focus-gnome-terminal-launch",
+        argv=argv,
+        returncode=result.returncode,
+        stderr=summarize_log_text(result.stderr),
+        stdout=summarize_log_text(result.stdout),
+        success=result.returncode == 0,
+    )
+    if result.returncode == 0:
+        delay = get_env_float(
+            "VOICE_AUTO_REFOCUS_DELAY",
+            AUTO_REFOCUS_DELAY_DEFAULT,
+            minimum=0.0,
+        )
+        if delay:
+            time.sleep(delay)
+        return True
+    return False
+
+
+def focus_gnome_terminal_favorite():
+    if not is_gnome_desktop():
+        return False
+    focus_mode = get_gnome_terminal_focus_mode()
+    append_auto_focus_log("focus-method", method="gnome-focus-mode", target=focus_mode)
+    if focus_mode == "off":
+        return False
+    app_id = os.environ.get(
+        "VOICE_AUTO_GNOME_APP_ID",
+        "org.gnome.Terminal.desktop",
+    ).strip()
+    if focus_mode == "app":
+        if focus_gnome_app(app_id):
+            append_auto_focus_log("focus-result", method="gnome-app", success=True)
+            return True
+        return False
+    if focus_mode in ("launch", "launch-first"):
+        if focus_gnome_terminal_launch():
+            append_auto_focus_log(
+                "focus-result",
+                method="gnome-terminal-launch",
+                success=True,
+            )
+            return True
+        if focus_mode == "launch":
+            return False
+    if focus_mode not in ("hotkey", "hotkey-first", "launch-first"):
+        return False
+    hotkey = get_gnome_favorite_hotkey(app_id)
+    append_auto_focus_log(
+        "focus-method",
+        method="gnome-favorite-hotkey",
+        target=hotkey or "",
+        success=bool(hotkey),
+    )
+    if hotkey and focus_with_hotkey(hotkey):
+        append_auto_focus_log(
+            "focus-result",
+            method="gnome-favorite-hotkey",
+            success=True,
+        )
+        return True
+    if focus_mode == "hotkey-first" and focus_gnome_terminal_launch():
+        append_auto_focus_log(
+            "focus-result",
+            method="gnome-terminal-launch",
+            success=True,
+        )
+        return True
+    return False
+
+
+def focus_auto_terminal_window():
+    if not get_env_flag("VOICE_AUTO_REFOCUS_TERMINAL", default=True):
+        append_auto_focus_log("focus-disabled", reason="VOICE_AUTO_REFOCUS_TERMINAL")
+        return False
+
+    window_id = (
+        os.environ.get("VOICE_AUTO_TERMINAL_WINDOW_ID")
+        or os.environ.get("WINDOWID")
+        or ""
+    ).strip()
+    title = os.environ.get("VOICE_AUTO_TERMINAL_WINDOW_TITLE", "").strip()
+    append_auto_focus_log(
+        "focus-start",
+        display=os.environ.get("DISPLAY", ""),
+        has_gdbus=bool(shutil.which("gdbus")),
+        has_gsettings=bool(shutil.which("gsettings")),
+        has_tmux=bool(shutil.which("tmux")),
+        has_wmctrl=bool(shutil.which("wmctrl")),
+        has_xdotool=bool(shutil.which("xdotool")),
+        has_ydotool=bool(shutil.which("ydotool")),
+        session_type=os.environ.get("XDG_SESSION_TYPE", ""),
+        terminal_window_id=window_id,
+        terminal_window_title=title,
+        wayland_display=os.environ.get("WAYLAND_DISPLAY", ""),
+    )
+    if window_id:
+        focused = focus_x11_window(window_id)
+        append_auto_focus_log(
+            "focus-method",
+            method="window-id",
+            target=window_id,
+            success=focused,
+        )
+        if focused:
+            append_auto_focus_log("focus-result", method="window-id", success=True)
+            return True
+
+    if title:
+        focused = focus_window_by_title(title)
+        append_auto_focus_log(
+            "focus-method",
+            method="window-title",
+            target=title,
+            success=focused,
+        )
+        if focused:
+            append_auto_focus_log("focus-result", method="window-title", success=True)
+            return True
+
+    client_pid = get_tmux_client_pid()
+    append_auto_focus_log(
+        "focus-method",
+        method="tmux-client-pid",
+        target=client_pid or "",
+        success=bool(client_pid),
+    )
+    if client_pid:
+        window_id = find_x11_window_by_pid(client_pid)
+        append_auto_focus_log(
+            "focus-method",
+            method="tmux-client-window",
+            target=window_id or "",
+            success=bool(window_id),
+        )
+        if window_id:
+            focused = focus_x11_window(window_id)
+            append_auto_focus_log(
+                "focus-method",
+                method="tmux-client-window-focus",
+                target=window_id,
+                success=focused,
+            )
+            if focused:
+                append_auto_focus_log(
+                    "focus-result",
+                    method="tmux-client-window",
+                    success=True,
+                )
+                return True
+
+    if focus_gnome_terminal_favorite():
+        return True
+
+    append_auto_focus_log("focus-result", method="", success=False)
+    return False
 
 
 def run_command_checked(argv, input_text=None, label=None, timeout=None):
@@ -3378,16 +4092,38 @@ def run_auto_shell_command(command):
     argv = command.get("argv") or []
     if not argv:
         return False
+    focus_success = focus_auto_terminal_window()
+    append_auto_focus_log(
+        "switch-start",
+        argv=argv,
+        focus_success=focus_success,
+        label=label,
+    )
     try:
         result = run_command(argv, timeout=2.0)
     except subprocess.TimeoutExpired:
+        append_auto_focus_log("switch-result", label=label, success=False, error="timeout")
         print(f"[auto] switch command timed out: {label}", file=sys.stderr)
         return False
     except OSError as exc:
+        append_auto_focus_log(
+            "switch-result",
+            label=label,
+            success=False,
+            error=str(exc),
+        )
         print(f"[auto] switch command failed: {label}: {exc}", file=sys.stderr)
         return False
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
+        append_auto_focus_log(
+            "switch-result",
+            label=label,
+            returncode=result.returncode,
+            stderr=summarize_log_text(result.stderr),
+            stdout=summarize_log_text(result.stdout),
+            success=False,
+        )
         if detail:
             print(
                 f"[auto] switch command failed for {label}: {detail}",
@@ -3400,7 +4136,118 @@ def run_auto_shell_command(command):
                 file=sys.stderr,
             )
         return False
-    print(f"[auto] switched to {label}.")
+    append_auto_focus_log(
+        "switch-result",
+        label=label,
+        returncode=result.returncode,
+        success=True,
+    )
+    message = command.get("success_message")
+    if message:
+        print(message)
+    else:
+        print(f"[auto] switched to {label}.")
+    if command.get("exit_after"):
+        raise SystemExit(0)
+    return True
+
+
+def send_text_to_tmux_target(command, text):
+    target = str(command.get("tmux_send_target") or "").strip()
+    label = command.get("label") or target or "tmux target"
+    text = str(text or "")
+    if not target:
+        append_auto_focus_log(
+            "tmux-send-result",
+            error="missing-target",
+            label=label,
+            success=False,
+        )
+        return False
+    if not shutil.which("tmux"):
+        append_auto_focus_log(
+            "tmux-send-result",
+            error="tmux-not-found",
+            label=label,
+            target=target,
+            success=False,
+        )
+        print(f"[auto] tmux not found; cannot send queued text to {label}.", file=sys.stderr)
+        return False
+
+    buffer_name = f"voice-workbench-{os.getpid()}"
+    append_auto_focus_log(
+        "tmux-send-start",
+        label=label,
+        target=target,
+        text_length=len(text),
+    )
+    commands = []
+    if text:
+        commands.extend(
+            [
+                ["tmux", "set-buffer", "-b", buffer_name, "--", text],
+                ["tmux", "paste-buffer", "-d", "-b", buffer_name, "-t", target],
+            ]
+        )
+    enter_delay = get_submit_enter_delay()
+    commands.append(["tmux", "send-keys", "-t", target, "C-m"])
+
+    for index, argv in enumerate(commands):
+        if enter_delay and index == len(commands) - 1:
+            time.sleep(enter_delay)
+        try:
+            result = run_command(argv, timeout=2.0)
+        except subprocess.TimeoutExpired:
+            append_auto_focus_log(
+                "tmux-send-result",
+                argv=argv,
+                error="timeout",
+                label=label,
+                target=target,
+                success=False,
+            )
+            print(f"[auto] tmux send timed out for {label}.", file=sys.stderr)
+            return False
+        except OSError as exc:
+            append_auto_focus_log(
+                "tmux-send-result",
+                argv=argv,
+                error=str(exc),
+                label=label,
+                target=target,
+                success=False,
+            )
+            print(f"[auto] tmux send failed for {label}: {exc}", file=sys.stderr)
+            return False
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            append_auto_focus_log(
+                "tmux-send-result",
+                argv=argv,
+                label=label,
+                returncode=result.returncode,
+                stderr=summarize_log_text(result.stderr),
+                stdout=summarize_log_text(result.stdout),
+                target=target,
+                success=False,
+            )
+            if detail:
+                print(f"[auto] tmux send failed for {label}: {detail}", file=sys.stderr)
+            else:
+                print(
+                    f"[auto] tmux send failed for {label} with code {result.returncode}.",
+                    file=sys.stderr,
+                )
+            return False
+
+    append_auto_focus_log(
+        "tmux-send-result",
+        label=label,
+        target=target,
+        text_length=len(text),
+        success=True,
+    )
     return True
 
 
@@ -4013,6 +4860,13 @@ def main():
         1.5,
         minimum=0.5,
     )
+    auto_trigger_arm_timeout_seconds = get_config_float(
+        config,
+        "VOICE_AUTO_TRIGGER_ARM_TIMEOUT_SECONDS",
+        "auto_trigger_arm_timeout_seconds",
+        8.0,
+        minimum=0.0,
+    )
     auto_trigger_word = str(
         os.environ.get("VOICE_AUTO_TRIGGER_WORD")
         or config.get("auto_trigger_word", "agent")
@@ -4543,13 +5397,13 @@ def main():
             "log_prefix": "auto",
         }
 
-    auto_trigger_session = {"armed": False, "clicked": False}
+    auto_trigger_session = make_auto_trigger_session()
 
     def print_auto_waiting():
         if auto_shell_commands:
             print("[auto] waiting for: " + format_colored_detection_words(), flush=True)
 
-    def click_auto_trigger_target():
+    def click_auto_trigger_target(source="trigger"):
         print(f"[auto] trigger '{auto_trigger_word}' detected; clicking target...")
         if not click_mouse_left():
             print(
@@ -4557,8 +5411,7 @@ def main():
                 "continuing with current focus.",
                 file=sys.stderr,
             )
-        auto_trigger_session["armed"] = True
-        auto_trigger_session["clicked"] = True
+        arm_auto_trigger_session(auto_trigger_session, source)
 
     def reset_auto_vad():
         if auto_vad_detector is not None:
@@ -4590,15 +5443,13 @@ def main():
         command_prefix = match_auto_shell_command_prefix(text, auto_shell_commands)
         if command_prefix is not None:
             shell_command, _queued_text = command_prefix
-            auto_trigger_session["armed"] = False
-            auto_trigger_session["clicked"] = False
+            reset_auto_trigger_session(auto_trigger_session)
             run_auto_shell_command(shell_command)
             print_auto_waiting()
             return False
         shell_command = match_auto_shell_command(text, auto_shell_commands)
         if shell_command is not None:
-            auto_trigger_session["armed"] = False
-            auto_trigger_session["clicked"] = False
+            reset_auto_trigger_session(auto_trigger_session)
             run_auto_shell_command(shell_command)
             print_auto_waiting()
             return False
@@ -4610,7 +5461,7 @@ def main():
         if queued_text is None:
             print(f"[auto] probe did not hear '{auto_trigger_word}'.")
             return False
-        click_auto_trigger_target()
+        click_auto_trigger_target(source="probe")
         return True
 
     def wait_for_auto_utterance():
@@ -4740,8 +5591,7 @@ def main():
         command_prefix = match_auto_shell_command_prefix(text, auto_shell_commands)
         if command_prefix is not None:
             shell_command, queued_text = command_prefix
-            auto_trigger_session["armed"] = False
-            auto_trigger_session["clicked"] = False
+            reset_auto_trigger_session(auto_trigger_session)
             if not run_auto_shell_command(shell_command):
                 print_auto_waiting()
                 return
@@ -4754,7 +5604,15 @@ def main():
                 delay = get_paste_delay()
                 if delay:
                     time.sleep(delay)
-                pasted = type_text_and_submit(queued_text)
+                if (
+                    shell_command.get("tmux_send_target")
+                    and get_env_flag("VOICE_AUTO_TMUX_DIRECT_SEND", default=True)
+                ):
+                    pasted = send_text_to_tmux_target(shell_command, queued_text)
+                    paste_action = "sent to tmux and pressed enter"
+                else:
+                    pasted = type_text_and_submit(queued_text)
+                    paste_action = "typed and pressed enter"
             finally:
                 PASTE_IN_PROGRESS.clear()
             paste_ms = (time.perf_counter() - paste_started) * 1000
@@ -4764,25 +5622,35 @@ def main():
             else:
                 append_transcript_history(queued_text, transcript_history_path)
                 print(
-                    "[auto] typed and pressed enter in "
+                    f"[auto] {paste_action} in "
                     f"{paste_ms:.1f} ms: {queued_text}"
                 )
             print_auto_waiting()
             return
         shell_command = match_auto_shell_command(text, auto_shell_commands)
         if shell_command is not None:
-            auto_trigger_session["armed"] = False
-            auto_trigger_session["clicked"] = False
+            reset_auto_trigger_session(auto_trigger_session)
             if run_auto_shell_command(shell_command):
                 print_auto_waiting()
                 return
-        if auto_trigger_session["armed"]:
+        if is_auto_trigger_session_armed(
+            auto_trigger_session,
+            auto_trigger_arm_timeout_seconds,
+        ):
             queued_text = extract_text_after_trigger_word(
                 text,
                 auto_trigger_word,
                 auto_trigger_aliases,
             )
             if queued_text is None:
+                if auto_trigger_session.get("source") == "probe":
+                    print(
+                        "[auto] ignored utterance: probe heard "
+                        f"'{auto_trigger_word}' but final transcript did not."
+                    )
+                    reset_auto_trigger_session(auto_trigger_session)
+                    print_auto_waiting()
+                    return
                 queued_text = text
         else:
             queued_text = extract_text_after_trigger_word(
@@ -4797,7 +5665,7 @@ def main():
         if not trigger_clicked and not auto_trigger_session["clicked"]:
             click_auto_trigger_target()
         if not queued_text:
-            auto_trigger_session["armed"] = True
+            arm_auto_trigger_session(auto_trigger_session, "trigger_only")
             print(
                 f"[auto] trigger '{auto_trigger_word}' armed; "
                 "waiting for words after trigger."
@@ -4821,8 +5689,7 @@ def main():
             report_paste_failure(queued_text)
         else:
             append_transcript_history(queued_text, transcript_history_path)
-            auto_trigger_session["armed"] = False
-            auto_trigger_session["clicked"] = False
+            reset_auto_trigger_session(auto_trigger_session)
             print(f"[auto] typed and pressed enter in {paste_ms:.1f} ms: {queued_text}")
         print_auto_waiting()
 
@@ -4838,6 +5705,7 @@ def main():
             f"vad={'sherpa' if auto_vad_detector is not None else 'rms'} "
             f"trigger='{auto_trigger_word}' "
             f"silence={auto_trigger_silence_seconds:.1f}s "
+            f"arm_timeout={auto_trigger_arm_timeout_seconds:.1f}s "
             f"threshold={auto_vad_threshold:.4f}"
         )
         if auto_shell_commands:

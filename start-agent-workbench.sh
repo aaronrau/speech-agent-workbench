@@ -19,6 +19,7 @@ VOICE_WINDOW="${VOICE_WINDOW:-}"
 ATTACH="${ATTACH:-1}"
 AUTO_LOG="${AUTO_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-auto.log}"
 AUTO_PID_FILE="${AUTO_PID_FILE:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-auto.pid}"
+AUTO_FOCUS_LOG="${AUTO_FOCUS_LOG:-${VOICE_AUTO_FOCUS_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-focus.log}}"
 
 usage() {
   cat <<'EOF'
@@ -39,6 +40,7 @@ Optional environment variables:
   AUTO_STT=1
   AUTO_STT_MODE=auto
   ATTACH=1
+  AUTO_FOCUS_LOG=/tmp/speech-agent-workbench-focus.log
 EOF
 }
 
@@ -220,11 +222,39 @@ style_window() {
 build_switch_map() {
   local entries=()
   while [[ "$#" -gt 0 ]]; do
-    entries+=("$1=$2")
+    local word="$1"
+    local target="$2"
+    local alias
+    entries+=("$word=$target")
+    alias="$(spoken_digit_alias "$word")"
+    if [[ -n "$alias" && "$alias" != "$word" ]]; then
+      entries+=("$alias=$target")
+    fi
     shift 2
   done
   local IFS=,
   printf '%s' "${entries[*]}"
+}
+
+spoken_digit_alias() {
+  python3 - "$1" <<'PY'
+import sys
+
+words = {
+    "0": "zero",
+    "1": "one",
+    "2": "two",
+    "3": "three",
+    "4": "four",
+    "5": "five",
+    "6": "six",
+    "7": "seven",
+    "8": "eight",
+    "9": "nine",
+}
+tokens = sys.argv[1].split()
+print(" ".join(words.get(token, token) for token in tokens))
+PY
 }
 
 display_words() {
@@ -233,6 +263,12 @@ display_words() {
     "$(normalize_spoken_name "$AGENT2_NAME")" \
     "$(normalize_spoken_name "$AGENT3_NAME")" \
     "$(normalize_spoken_name "$VOICE_NAME")"
+}
+
+terminate_words_for_voice() {
+  local voice_word="$1"
+  printf '%s terminate session,%s terminates session,%s terminate sessions,%s terminates sessions' \
+    "$voice_word" "$voice_word" "$voice_word" "$voice_word"
 }
 
 start_agent_panes() {
@@ -330,8 +366,10 @@ auto_stt_command() {
   local words="$2"
   local trigger_word
   trigger_word="$(normalize_spoken_name "$AGENT1_NAME")"
-  printf 'VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_TMUX_SWITCHES=%q VOICE_AUTO_DISPLAY_WORDS=%q VOICE_AUTO_TRIGGER_WORD=%q %q' \
-    "$SESSION_NAME" "$switches" "$words" "$trigger_word" "$ROOT/run-auto.sh"
+  local terminate_words
+  terminate_words="$(terminate_words_for_voice "$(normalize_spoken_name "$VOICE_NAME")")"
+  printf 'VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_TMUX_SWITCHES=%q VOICE_AUTO_DISPLAY_WORDS=%q VOICE_AUTO_TRIGGER_WORD=%q VOICE_AUTO_TMUX_TERMINATE_WORDS=%q VOICE_AUTO_FOCUS_LOG=%q %q' \
+    "$SESSION_NAME" "$switches" "$words" "$trigger_word" "$terminate_words" "$AUTO_FOCUS_LOG" "$ROOT/run-auto.sh"
 }
 
 process_is_running() {
@@ -416,6 +454,8 @@ start_auto_stt() {
     VOICE_AUTO_TMUX_SWITCHES="$switches" \
     VOICE_AUTO_DISPLAY_WORDS="$words" \
     VOICE_AUTO_TRIGGER_WORD="$(normalize_spoken_name "$AGENT1_NAME")" \
+    VOICE_AUTO_TMUX_TERMINATE_WORDS="$(terminate_words_for_voice "$(normalize_spoken_name "$VOICE_NAME")")" \
+    VOICE_AUTO_FOCUS_LOG="$AUTO_FOCUS_LOG" \
     "$ROOT/run-auto.sh" >"$AUTO_LOG" 2>&1 &
   echo "$!" >"$AUTO_PID_FILE"
 }
