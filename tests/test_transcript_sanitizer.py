@@ -369,6 +369,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             {
                 "VOICE_AUTO_TMUX_SESSION": "speech-agent-workbench",
                 "VOICE_AUTO_TMUX_SWITCHES": "voice=pane:%4",
+                "VOICE_AUTO_ENABLE_TERMINATE_COMMANDS": "1",
                 "VOICE_AUTO_TMUX_TERMINATE_WORDS": (
                     "voice terminate session,voice terminates session,"
                     "voice terminate sessions,voice terminates sessions"
@@ -385,6 +386,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         )
         self.assertNotIn("tmux_send_target", command)
         self.assertTrue(command["exit_after"])
+        self.assertFalse(command["allow_prefix"])
         for label in (
             "voice terminates session",
             "voice terminate sessions",
@@ -392,6 +394,21 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         ):
             self.assertEqual(commands[label]["argv"], command["argv"])
             self.assertTrue(commands[label]["exit_after"])
+
+    def test_auto_tmux_switch_commands_disable_terminate_commands_by_default(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "VOICE_AUTO_TMUX_SESSION": "speech-agent-workbench",
+                "VOICE_AUTO_TMUX_SWITCHES": "voice=pane:%4",
+                "VOICE_AUTO_TMUX_TERMINATE_WORDS": "voice terminate session",
+            },
+            clear=True,
+        ):
+            commands = build_auto_tmux_switch_commands({})
+
+        self.assertIn("voice", commands)
+        self.assertNotIn("voice terminate session", commands)
 
     def test_match_auto_shell_command_accepts_exact_switch_word(self):
         commands = {"agent two": {"label": "agent two", "argv": ["tmux"]}}
@@ -414,6 +431,26 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
 
         self.assertIsNone(
             match_auto_shell_command("agent update the tests", commands)
+        )
+
+    def test_match_auto_shell_command_prefix_skips_exact_only_commands(self):
+        commands = {
+            "voice confirm terminate session": {
+                "label": "voice confirm terminate session",
+                "argv": ["tmux", "kill-session"],
+                "allow_prefix": False,
+            }
+        }
+
+        self.assertIsNone(
+            match_auto_shell_command_prefix(
+                "Voice confirm terminate session please",
+                commands,
+            )
+        )
+        self.assertEqual(
+            match_auto_shell_command("Voice confirm terminate session", commands),
+            commands["voice confirm terminate session"],
         )
 
     def test_match_auto_shell_command_prefix_accepts_target_and_message(self):

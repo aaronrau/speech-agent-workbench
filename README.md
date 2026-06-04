@@ -15,7 +15,7 @@ it as a fun local script for trying ideas quickly.
 - Voice routing by pane/window name: say `<agent name>` to switch targets or `<agent name> <message>` to send text directly to that tmux target and press Enter.
 - Configurable agent names, working directories, pane/window layout, voice pane name, trigger word, aliases, paste mode, and input devices.
 - Numeric pane names get spoken-number aliases, so a name containing `2` can be addressed as `two`.
-- Voice session shutdown with phrases like `<voice pane name> terminate session`.
+- Optional voice session shutdown commands, disabled by default.
 - Default local STT uses Parakeet ONNX through `onnx-asr`.
 - First-run startup creates `.venv`, installs Python requirements, checks model downloads, logs the Hugging Face cache path, and preloads Parakeet ONNX before listening starts.
 - The workbench launcher waits for STT/VAD models to finish loading before reporting the voice listener ready.
@@ -55,6 +55,7 @@ Important fields:
 - `sherpa_model_dir`: included Parakeet ONNX model directory
 - `auto_trigger_word`: default is `agent`
 - `auto_trigger_aliases`: defaults include `codex`, `code x`, and `condex`
+- `auto_enable_terminate_commands`: default is `false`
 - `transcript_correction_backend`: set to `llama-cpp` for model cleanup
 - `transcript_correction_llama_cpp_model`: GGUF model path for llama.cpp cleanup
 - `paste_mode`: `type`, `clipboard`, `hotkey`, or `auto`
@@ -91,6 +92,24 @@ OpenAI-compatible chat endpoint, so the GGUF stays loaded between utterances.
 If no server can be reached or started, it falls back to one-shot `llama-cli`.
 Use a `llama-cli`/`llama-server` pair built from the same llama.cpp build, for
 example a local ROCm/HIP build plus a compatible GGUF model.
+
+### Optional Terminate Command
+
+Voice commands that kill the tmux workbench are disabled by default because STT
+can mishear short greetings or filler words. To opt in, use an explicit phrase
+in your local `config.json`:
+
+```json
+{
+  "auto_enable_terminate_commands": true,
+  "auto_tmux_terminate_words": [
+    "voice confirm terminate session"
+  ]
+}
+```
+
+Terminate commands require an exact phrase match and are not used for
+agent-prefixed message routing.
 
 ### Voice-Friendly Names
 
@@ -169,7 +188,8 @@ look like this:
 ```
 
 Say `forge add tests for phone verification` to send that prompt to the
-`Forge` pane, or `wolf terminate session` to stop the voice workbench.
+`Forge` pane. If you opt into terminate commands, use the exact phrase you
+configured in `auto_tmux_terminate_words`.
 
 ## Notes
 

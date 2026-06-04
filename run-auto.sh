@@ -60,6 +60,9 @@ values = {
     "CONFIG_AGENT3_NAME": item_name(agents, 2),
     "CONFIG_VOICE_NAME": voice.get("name") or "",
     "CONFIG_TRIGGER_ALIASES": list_value(config.get("auto_trigger_aliases")),
+    "CONFIG_ENABLE_TERMINATE_COMMANDS": config.get(
+        "auto_enable_terminate_commands", ""
+    ),
 }
 for key, value in values.items():
     print(f"{key}={shlex.quote(str(value))}")
@@ -140,6 +143,16 @@ terminate_words_for_voice() {
     "$voice_word" "$voice_word" "$voice_word" "$voice_word"
 }
 
+auto_terminate_enabled() {
+  local value="${VOICE_AUTO_ENABLE_TERMINATE_COMMANDS:-${CONFIG_ENABLE_TERMINATE_COMMANDS:-0}}"
+  case "${value,,}" in
+    1|true|yes|on)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 prefetch_voice_models() {
   case "${VOICE_AUTO_PREFETCH_MODELS:-1}" in
     0|false|no|none|null|off)
@@ -212,6 +225,7 @@ export VOICE_AUTO_SHERPA_VAD_MODEL="$VAD_MODEL"
 export VOICE_AUTO_TMUX_SESSION="$AUTO_TMUX_SESSION"
 export VOICE_AUTO_FOCUS_LOG="${VOICE_AUTO_FOCUS_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-focus.log}"
 export VOICE_READY_FILE="${VOICE_READY_FILE:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-${AUTO_READY_SESSION_NAME:-auto}-auto.ready}"
+export VOICE_AUTO_ENABLE_TERMINATE_COMMANDS="${VOICE_AUTO_ENABLE_TERMINATE_COMMANDS:-${CONFIG_ENABLE_TERMINATE_COMMANDS:-}}"
 
 case "${VOICE_AUTO_START_AGENT_WORKBENCH:-1}" in
   1|true|yes|on)
@@ -226,7 +240,11 @@ esac
 
 export VOICE_AUTO_TMUX_SWITCHES="${VOICE_AUTO_TMUX_SWITCHES:-$(default_switches)}"
 export VOICE_AUTO_DISPLAY_WORDS="${VOICE_AUTO_DISPLAY_WORDS:-$(display_words)}"
-export VOICE_AUTO_TMUX_TERMINATE_WORDS="${VOICE_AUTO_TMUX_TERMINATE_WORDS:-$(terminate_words_for_voice "$(normalize_spoken_name "$AUTO_VOICE_NAME")")}"
+if auto_terminate_enabled; then
+  export VOICE_AUTO_TMUX_TERMINATE_WORDS="${VOICE_AUTO_TMUX_TERMINATE_WORDS:-$(terminate_words_for_voice "$(normalize_spoken_name "$AUTO_VOICE_NAME")")}"
+else
+  unset VOICE_AUTO_TMUX_TERMINATE_WORDS
+fi
 
 case "${VOICE_AUTO_VAD_BACKEND}" in
   sherpa|silero|silero-vad|sherpa-vad)

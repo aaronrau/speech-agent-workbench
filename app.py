@@ -92,6 +92,7 @@ DEFAULT_CONFIG = {
     "auto_trigger_aliases": ["codex", "code x", "condex"],
     "auto_tmux_switch_session": None,
     "auto_tmux_switch_words": {},
+    "auto_enable_terminate_commands": False,
     "auto_tmux_terminate_words": [],
     "transcript_correction_backend": "off",
     "transcript_correction_max_new_tokens": 96,
@@ -322,6 +323,29 @@ def strip_voice_attention_words(words):
     return words[index:], index
 
 
+def parse_config_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "none", "null", "off", ""):
+        return False
+    return None
+
+
+def terminate_commands_enabled(config):
+    value = os.environ.get("VOICE_AUTO_ENABLE_TERMINATE_COMMANDS")
+    if value is None:
+        value = config.get(
+            "auto_enable_terminate_commands",
+            DEFAULT_CONFIG["auto_enable_terminate_commands"],
+        )
+    return bool(parse_config_bool(value))
+
+
 def parse_key_value_list(value):
     if value is None:
         return {}
@@ -402,24 +426,26 @@ def build_auto_tmux_switch_commands(config):
         for alias in build_command_text_aliases(normalized):
             commands.setdefault(alias, command)
 
-    terminate_value = os.environ.get("VOICE_AUTO_TMUX_TERMINATE_WORDS")
-    if terminate_value is None:
-        terminate_value = config.get(
-            "auto_tmux_terminate_words",
-            DEFAULT_CONFIG["auto_tmux_terminate_words"],
-        )
-    for spoken_name in parse_word_list(terminate_value):
-        normalized = normalize_voice_command_text(spoken_name)
-        if not normalized:
-            continue
-        command = {
-            "label": spoken_name,
-            "argv": ["tmux", "kill-session", "-t", session],
-            "success_message": f"[auto] terminating tmux session: {session}",
-            "exit_after": True,
-        }
-        for alias in build_command_text_aliases(normalized):
-            commands.setdefault(alias, command)
+    if terminate_commands_enabled(config):
+        terminate_value = os.environ.get("VOICE_AUTO_TMUX_TERMINATE_WORDS")
+        if terminate_value is None:
+            terminate_value = config.get(
+                "auto_tmux_terminate_words",
+                DEFAULT_CONFIG["auto_tmux_terminate_words"],
+            )
+        for spoken_name in parse_word_list(terminate_value):
+            normalized = normalize_voice_command_text(spoken_name)
+            if not normalized:
+                continue
+            command = {
+                "label": spoken_name,
+                "argv": ["tmux", "kill-session", "-t", session],
+                "success_message": f"[auto] terminating tmux session: {session}",
+                "exit_after": True,
+                "allow_prefix": False,
+            }
+            for alias in build_command_text_aliases(normalized):
+                commands.setdefault(alias, command)
     return commands
 
 
@@ -475,6 +501,8 @@ def match_auto_shell_command_prefix(text, commands):
     spoken_tokens, start_index = strip_voice_attention_words(spoken_tokens)
     matches = []
     for command_text, command in commands.items():
+        if command.get("allow_prefix") is False:
+            continue
         command_tokens = command_text.split()
         if not command_tokens:
             continue

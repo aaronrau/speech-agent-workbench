@@ -21,6 +21,7 @@
   "auto_trigger_probe_window_seconds": 1.5,
   "auto_trigger_silence_seconds": 2.0,
   "auto_trigger_word": "agent",
+  "auto_enable_terminate_commands": false,
   "auto_tmux_terminate_words": [],
   "auto_tmux_switch_session": null,
   "auto_tmux_switch_words": {},

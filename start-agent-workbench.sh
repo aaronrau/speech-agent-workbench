@@ -283,12 +283,6 @@ display_words() {
     "$(normalize_spoken_name "$VOICE_NAME")"
 }
 
-terminate_words_for_voice() {
-  local voice_word="$1"
-  printf '%s terminate session,%s terminates session,%s terminate sessions,%s terminates sessions' \
-    "$voice_word" "$voice_word" "$voice_word" "$voice_word"
-}
-
 start_agent_panes() {
   local agent1_pane
   local agent2_pane
@@ -530,7 +524,6 @@ start_auto_stt() {
     VOICE_AUTO_TMUX_SWITCHES="$switches" \
     VOICE_AUTO_DISPLAY_WORDS="$words" \
     VOICE_AUTO_TRIGGER_WORD="$(normalize_spoken_name "$AGENT1_NAME")" \
-    VOICE_AUTO_TMUX_TERMINATE_WORDS="$(terminate_words_for_voice "$(normalize_spoken_name "$VOICE_NAME")")" \
     VOICE_AUTO_FOCUS_LOG="$AUTO_FOCUS_LOG" \
     "$ROOT/run-auto.sh" >"$AUTO_LOG" 2>&1 &
   echo "$!" >"$AUTO_PID_FILE"
