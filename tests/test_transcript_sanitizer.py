@@ -7,10 +7,14 @@ from unittest import mock
 from app import (
     append_transcript_history,
     arm_auto_trigger_session,
+    build_command_text_aliases,
     build_auto_tmux_switch_commands,
     build_sherpa_vad,
+    correct_common_coding_terms,
+    correct_transcript_text,
     extract_text_after_trigger_word,
     format_colored_detection_words,
+    get_transcript_correction_backend,
     get_transcript_history_path,
     is_auto_trigger_session_armed,
     is_likely_bad_transcript,
@@ -102,9 +106,10 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
     def test_extract_text_after_trigger_word_allows_no_queued_text(self):
         self.assertEqual(extract_text_after_trigger_word("agent.", "agent"), "")
 
-    def test_extract_text_after_trigger_word_ignores_aliases(self):
-        self.assertIsNone(
+    def test_extract_text_after_trigger_word_accepts_aliases(self):
+        self.assertEqual(
             extract_text_after_trigger_word("assistant create issue", "agent", ["assistant"]),
+            "create issue",
         )
 
     def test_parse_word_list_accepts_comma_separated_aliases(self):
@@ -118,6 +123,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertFalse(is_auto_trigger_session_armed(session, 8.0, now=18.1))
         self.assertFalse(session["armed"])
         self.assertFalse(session["clicked"])
+        self.assertFalse(session["focus_failed"])
         self.assertIsNone(session["source"])
 
     def test_auto_trigger_session_keeps_recent_armed_state(self):
@@ -129,6 +135,21 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertTrue(session["armed"])
         self.assertEqual(session["source"], "trigger_only")
 
+    def test_auto_trigger_session_tracks_focus_failure(self):
+        session = make_auto_trigger_session()
+
+        arm_auto_trigger_session(
+            session,
+            "probe",
+            now=10.0,
+            focus_success=False,
+        )
+
+        self.assertTrue(session["armed"])
+        self.assertFalse(session["clicked"])
+        self.assertTrue(session["focus_failed"])
+        self.assertEqual(session["source"], "probe")
+
     def test_auto_trigger_session_timeout_zero_disarms(self):
         session = make_auto_trigger_session()
 
@@ -136,6 +157,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
 
         self.assertFalse(is_auto_trigger_session_armed(session, 0.0, now=10.1))
         self.assertFalse(session["armed"])
+        self.assertFalse(session["focus_failed"])
 
     def test_reset_auto_trigger_session_clears_metadata(self):
         session = make_auto_trigger_session()
@@ -223,6 +245,123 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             ["tmux", "select-pane", "-t", "%12"],
         )
         self.assertEqual(commands["agent two"]["tmux_send_target"], "%12")
+        self.assertEqual(commands["agent to"]["tmux_send_target"], "%12")
+        self.assertEqual(commands["agent too"]["tmux_send_target"], "%12")
+        self.assertEqual(commands["agent 2"]["tmux_send_target"], "%12")
+
+    def test_build_command_text_aliases_includes_codex_homophones(self):
+        self.assertIn("code x", build_command_text_aliases("codex"))
+        self.assertIn("condex", build_command_text_aliases("codex"))
+
+    def test_build_command_text_aliases_includes_agent_homophones(self):
+        self.assertIn("flex", build_command_text_aliases("flux"))
+        commands = {"flex": {"label": "flux", "argv": ["tmux"]}}
+        self.assertEqual(
+            match_auto_shell_command_prefix(
+                "Hey Flex what are the daily active users",
+                commands,
+            ),
+            (commands["flex"], "what are the daily active users"),
+        )
+
+    def test_correct_common_coding_terms_fixes_codex_and_tmux(self):
+        self.assertEqual(
+            correct_common_coding_terms("ask condex to inspect tea mux"),
+            "ask Codex to inspect tmux",
+        )
+
+    def test_correct_common_coding_terms_fixes_langfuse_homophones(self):
+        self.assertEqual(
+            correct_common_coding_terms("open the length view trace"),
+            "open the Langfuse trace",
+        )
+
+    def test_correct_transcript_text_uses_common_terms_when_model_disabled(self):
+        self.assertEqual(
+            correct_transcript_text(
+                "code x check git hub",
+                {"transcript_correction_backend": "off"},
+            ),
+            "Codex check GitHub",
+        )
+
+    def test_gemma_backend_alias_uses_llama_cpp(self):
+        self.assertEqual(
+            get_transcript_correction_backend(
+                {"transcript_correction_backend": "gemma"}
+            ),
+            "llama-cpp",
+        )
+
+    def test_correct_transcript_text_uses_llama_cpp_backend(self):
+        completed = mock.Mock(
+            returncode=0,
+            stdout=(
+                "Loading model...\n"
+                "> Raw transcript: ask Langfuse to inspect Codex trace\n"
+                "|\b \bask Langfuse to inspect the Codex trace\n"
+                "Exiting...\n"
+            ),
+            stderr="",
+        )
+        config = {
+            "transcript_correction_backend": "llama.cpp",
+            "transcript_correction_llama_cpp_path": "/tmp/llama-cli",
+            "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
+            "transcript_correction_llama_cpp_gpu_layers": 99,
+            "transcript_correction_llama_cpp_timeout": 3.0,
+            "transcript_correction_max_new_tokens": 32,
+        }
+
+        app.TRANSCRIPT_CORRECTION_FAILURES.clear()
+        with mock.patch.object(
+            app,
+            "correct_transcript_with_llama_cpp_server",
+            side_effect=RuntimeError("server unavailable"),
+        ):
+            with mock.patch.object(
+                app.subprocess,
+                "run",
+                return_value=completed,
+            ) as run:
+                result = correct_transcript_text(
+                    "ask length view to inspect code x trace",
+                    config,
+                )
+
+        self.assertEqual(result, "ask Langfuse to inspect the Codex trace")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0], "/tmp/llama-cli")
+        self.assertIn("/tmp/model.gguf", argv)
+        self.assertIn("--reasoning", argv)
+        self.assertIn("-ngl", argv)
+
+    def test_correct_transcript_text_prefers_llama_cpp_server(self):
+        config = {
+            "transcript_correction_backend": "llama.cpp",
+            "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
+            "transcript_correction_max_new_tokens": 32,
+        }
+
+        app.TRANSCRIPT_CORRECTION_FAILURES.clear()
+        with mock.patch.object(
+            app,
+            "correct_transcript_with_llama_cpp_server",
+            return_value="Hey Flux what are the daily active users for today",
+        ) as server:
+            with mock.patch.object(app.subprocess, "run") as run:
+                result = correct_transcript_text(
+                    "Hey Flex what are the daily active users for today",
+                    config,
+                    command_labels=["flux", "forge", "niles", "wolf"],
+                )
+
+        self.assertEqual(
+            result,
+            "Hey Flux what are the daily active users for today",
+        )
+        server.assert_called_once()
+        run.assert_not_called()
 
     def test_auto_tmux_switch_commands_include_configured_terminate_commands(self):
         with mock.patch.dict(

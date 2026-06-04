@@ -1,6 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_ROOT="${VOICE_VENV:-$ROOT/.venv}"
 PYTHON_BIN="$VENV_ROOT/bin/python"
@@ -14,7 +15,6 @@ export VOICE_DEFAULT_TRANSCRIBE_BACKEND="${VOICE_DEFAULT_TRANSCRIBE_BACKEND:-par
 export VOICE_FALLBACK_BACKEND="${VOICE_FALLBACK_BACKEND:-parakeet-onnx}"
 export VOICE_RUN_MODE=auto
 export VOICE_AUTO_TRIGGER_WORD="${VOICE_AUTO_TRIGGER_WORD:-agent}"
-export VOICE_AUTO_TRIGGER_ALIASES="${VOICE_AUTO_TRIGGER_ALIASES:-}"
 export VOICE_AUTO_TRIGGER_PROBE_SECONDS="${VOICE_AUTO_TRIGGER_PROBE_SECONDS:-0.5}"
 export VOICE_AUTO_TRIGGER_MIN_PROBE_SECONDS="${VOICE_AUTO_TRIGGER_MIN_PROBE_SECONDS:-1}"
 export VOICE_AUTO_TRIGGER_PROBE_WINDOW_SECONDS="${VOICE_AUTO_TRIGGER_PROBE_WINDOW_SECONDS:-1.5}"
@@ -392,6 +392,105 @@ ensure_auto_vad_model() {
   esac
 }
 
+ensure_transcript_correction_assets() {
+  local exports
+  exports="$("$PYTHON_BIN" - "$ROOT" <<'PY'
+import json
+import os
+import shlex
+import shutil
+import sys
+
+root = sys.argv[1]
+path = os.environ.get("VOICE_HOTKEY_CONFIG")
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+except Exception:
+    config = {}
+
+backend = os.environ.get("VOICE_TRANSCRIPT_CORRECTION_BACKEND")
+if backend is None:
+    backend = config.get("transcript_correction_backend", "off")
+backend = str(backend or "").strip().lower()
+if backend in ("", "0", "false", "no", "none", "null", "off"):
+    raise SystemExit(0)
+if backend in ("gemma", "gemma4", "gemma-4", "llama", "llamacpp", "llama.cpp"):
+    backend = "llama-cpp"
+if backend != "llama-cpp":
+    print(
+        f"[run] transcript correction backend '{backend}' is not managed by run.sh.",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
+
+
+def configured_path(env_name, config_name, default):
+    value = os.environ.get(env_name)
+    if value in (None, ""):
+        value = config.get(config_name, default)
+    return os.path.expanduser(str(value or "").strip())
+
+
+def resolve_path(value, *, executable=False):
+    if not value:
+        return ""
+    if os.path.isabs(value):
+        return value
+    if os.sep not in value:
+        found = shutil.which(value)
+        if found:
+            return found
+    candidate = os.path.join(root, value)
+    if os.path.exists(candidate) or executable:
+        return candidate
+    return value
+
+
+binary = resolve_path(
+    configured_path(
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_PATH",
+        "transcript_correction_llama_cpp_path",
+        "llama-cli",
+    ),
+    executable=True,
+)
+model = resolve_path(
+    configured_path(
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_MODEL",
+        "transcript_correction_llama_cpp_model",
+        "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q8_0.gguf",
+    )
+)
+
+errors = []
+if not binary or not os.path.isfile(binary) or not os.access(binary, os.X_OK):
+    errors.append(f"llama.cpp binary is missing or not executable: {binary or '<unset>'}")
+if not model or not os.path.isfile(model):
+    errors.append(f"transcript correction model is missing: {model or '<unset>'}")
+if errors:
+    for error in errors:
+        print(f"[run] {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+print("[run] transcript correction -> llama.cpp", file=sys.stderr)
+print(f"[run] llama.cpp binary: {binary}", file=sys.stderr)
+print(f"[run] llama.cpp model: {model}", file=sys.stderr)
+print(
+    "export VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_PATH="
+    + shlex.quote(binary)
+)
+print(
+    "export VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_MODEL="
+    + shlex.quote(model)
+)
+PY
+)"
+  if [[ -n "$exports" ]]; then
+    eval "$exports"
+  fi
+}
+
 is_truthy() {
   case "${1:-}" in
     1|true|yes|on)
@@ -416,6 +515,7 @@ ensure_parakeet_onnx
 ensure_parakeet_onnx_model
 log_backend_fallback
 ensure_auto_vad_model
+ensure_transcript_correction_assets
 if is_truthy "${VOICE_PREFETCH_ONLY:-0}"; then
   echo "[run] model prefetch complete." >&2
   exit 0

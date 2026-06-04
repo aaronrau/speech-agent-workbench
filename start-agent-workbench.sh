@@ -1,6 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_PATH="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
 
@@ -379,14 +380,8 @@ default_switches() {
 }
 
 auto_stt_command() {
-  local switches="$1"
-  local words="$2"
-  local trigger_word
-  trigger_word="$(normalize_spoken_name "$AGENT1_NAME")"
-  local terminate_words
-  terminate_words="$(terminate_words_for_voice "$(normalize_spoken_name "$VOICE_NAME")")"
-  printf 'VOICE_READY_FILE=%q VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_TMUX_SWITCHES=%q VOICE_AUTO_DISPLAY_WORDS=%q VOICE_AUTO_TRIGGER_WORD=%q VOICE_AUTO_TMUX_TERMINATE_WORDS=%q VOICE_AUTO_FOCUS_LOG=%q %q' \
-    "$AUTO_READY_FILE" "$SESSION_NAME" "$switches" "$words" "$trigger_word" "$terminate_words" "$AUTO_FOCUS_LOG" "$ROOT/run-auto.sh"
+  printf 'VOICE_HOTKEY_CONFIG=%q VOICE_READY_FILE=%q VOICE_CONFIG_PROMPT=0 VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_FOCUS_LOG=%q /bin/bash %q' \
+    "$CONFIG_PATH" "$AUTO_READY_FILE" "$SESSION_NAME" "$AUTO_FOCUS_LOG" "$ROOT/run-auto.sh"
 }
 
 process_is_running() {
@@ -455,7 +450,7 @@ start_auto_stt() {
   local words
   words="${VOICE_AUTO_DISPLAY_WORDS:-$(display_words)}"
   local command
-  command="$(auto_stt_command "$switches" "$words")"
+  command="$(auto_stt_command)"
   local mode
   mode="$AUTO_STT_MODE"
   if [[ "$mode" == "auto" ]]; then
@@ -529,6 +524,7 @@ start_auto_stt() {
   clear_auto_stt_ready
   nohup env \
     VOICE_READY_FILE="$AUTO_READY_FILE" \
+    VOICE_CONFIG_PROMPT=0 \
     VOICE_AUTO_START_AGENT_WORKBENCH=0 \
     VOICE_AUTO_TMUX_SESSION="$SESSION_NAME" \
     VOICE_AUTO_TMUX_SWITCHES="$switches" \

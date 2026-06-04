@@ -23,6 +23,7 @@ it as a fun local script for trying ideas quickly.
 - Sherpa/Silero VAD support for automatic speech detection.
 - X11 and Wayland typing support through `xdotool`/`xclip`, `wtype`, `wl-clipboard`, or `ydotool`.
 - Direct tmux send mode for agent-prefixed messages, so routed commands do not depend on desktop focus.
+- Optional Gemma GGUF transcript correction through llama.cpp, with fast built-in cleanup for common Codex/tmux/GitHub STT mistakes.
 - Focus and tmux-send diagnostics are written to a configurable log file.
 
 ## Install
@@ -53,9 +54,43 @@ Important fields:
 - `transcribe_backend`: default is `parakeet-onnx`
 - `sherpa_model_dir`: included Parakeet ONNX model directory
 - `auto_trigger_word`: default is `agent`
+- `auto_trigger_aliases`: defaults include `codex`, `code x`, and `condex`
+- `transcript_correction_backend`: set to `llama-cpp` for model cleanup
+- `transcript_correction_llama_cpp_model`: GGUF model path for llama.cpp cleanup
 - `paste_mode`: `type`, `clipboard`, `hotkey`, or `auto`
 - `agent_workbench.agent_command`: command to start in each agent pane
 - `agent_workbench.agents`: pane names and working directories
+
+### llama.cpp STT Cleanup
+
+The built-in fast cleanup always fixes common coding-agent ASR mistakes such as
+`condex`/`code x` to `Codex`, `tea mux` to `tmux`, and `git hub` to `GitHub`.
+It also treats `length view`, `lang fuse`, and similar phonetic variants as
+`Langfuse`. It adds command aliases like `agent to`, `agent too`, and `agent 2`
+for a configured `agent two` pane.
+
+For model-based cleanup with llama.cpp, add values like these to your local
+`config.json`. These are examples; keep your real local paths and runtime
+settings in `config.json`, which is git-ignored.
+
+```json
+{
+  "transcript_correction_backend": "llama-cpp",
+  "transcript_correction_llama_cpp_path": "models/llama.cpp-rocm/build-rocm/bin/llama-cli",
+  "transcript_correction_llama_cpp_server_path": "llama-server",
+  "transcript_correction_llama_cpp_server_url": "http://127.0.0.1:18087",
+  "transcript_correction_llama_cpp_server_autostart": true,
+  "transcript_correction_llama_cpp_model": "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q8_0.gguf",
+  "transcript_correction_llama_cpp_gpu_layers": 99,
+  "transcript_correction_max_new_tokens": 32
+}
+```
+
+The llama.cpp backend prefers a persistent `llama-server` process using the
+OpenAI-compatible chat endpoint, so the GGUF stays loaded between utterances.
+If no server can be reached or started, it falls back to one-shot `llama-cli`.
+Use a `llama-cli`/`llama-server` pair built from the same llama.cpp build, for
+example a local ROCm/HIP build plus a compatible GGUF model.
 
 ### Voice-Friendly Names
 
@@ -107,7 +142,10 @@ The app clicks the current mouse position, types the words after the trigger, an
 ```
 
 On interactive launch, the workbench script shows the saved agent command, pane names, and paths. Accept the defaults or update them. The values are saved in `config.json`.
-When launched through `./run-auto.sh`, model downloads are checked in the foreground before tmux starts so download/cache logs are visible. Set `VOICE_AUTO_PREFETCH_MODELS=off` to skip that foreground check.
+When launched through `./run-auto.sh`, model downloads and enabled
+transcript-correction assets are checked in the foreground before tmux starts so
+download/cache logs are visible. Set `VOICE_AUTO_PREFETCH_MODELS=off` to skip
+that foreground check.
 The launcher does not block on the voice pane by default after startup. Set `AUTO_READY_TIMEOUT=300` to wait for a ready signal from the listener.
 
 ### Example Run

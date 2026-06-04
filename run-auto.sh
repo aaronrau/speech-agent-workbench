@@ -1,8 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_PATH="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
+export VOICE_HOTKEY_CONFIG="$CONFIG_PATH"
 VAD_MODEL="${VOICE_AUTO_SHERPA_VAD_MODEL:-$ROOT/models/silero_vad.onnx}"
 VAD_URL="${VOICE_AUTO_SHERPA_VAD_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx}"
 
@@ -44,6 +46,11 @@ def item_name(items, index):
         return items[index].get("name") or ""
     return ""
 
+def list_value(value):
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(item) for item in value if str(item).strip())
+    return value or ""
+
 values = {
     "CONFIG_SESSION_NAME": get_setting("session_name"),
     "CONFIG_AGENT_LAYOUT": get_setting("layout"),
@@ -52,6 +59,7 @@ values = {
     "CONFIG_AGENT2_NAME": item_name(agents, 1),
     "CONFIG_AGENT3_NAME": item_name(agents, 2),
     "CONFIG_VOICE_NAME": voice.get("name") or "",
+    "CONFIG_TRIGGER_ALIASES": list_value(config.get("auto_trigger_aliases")),
 }
 for key, value in values.items():
     print(f"{key}={shlex.quote(str(value))}")
@@ -187,10 +195,12 @@ AUTO_LAYOUT="${AGENT_LAYOUT:-$CONFIG_AGENT_LAYOUT}"
 AUTO_PANES_WINDOW="${PANES_WINDOW:-$CONFIG_PANES_WINDOW}"
 AUTO_VOICE_WINDOW="${VOICE_WINDOW:-$AUTO_VOICE_NAME}"
 AUTO_TMUX_SESSION="${VOICE_AUTO_TMUX_SESSION:-${SESSION_NAME:-$CONFIG_SESSION_NAME}}"
+AUTO_READY_SESSION_NAME="${AUTO_TMUX_SESSION//[^a-zA-Z0-9_.-]/_}"
 
 export VOICE_RUN_MODE=auto
+export VOICE_CONFIG_PROMPT="${VOICE_CONFIG_PROMPT:-0}"
 export VOICE_AUTO_TRIGGER_WORD="${VOICE_AUTO_TRIGGER_WORD:-$(normalize_spoken_name "$AUTO_AGENT1_NAME")}"
-export VOICE_AUTO_TRIGGER_ALIASES="${VOICE_AUTO_TRIGGER_ALIASES:-}"
+export VOICE_AUTO_TRIGGER_ALIASES="${VOICE_AUTO_TRIGGER_ALIASES-$CONFIG_TRIGGER_ALIASES}"
 export VOICE_AUTO_TRIGGER_PROBE_SECONDS="${VOICE_AUTO_TRIGGER_PROBE_SECONDS:-0.5}"
 export VOICE_AUTO_TRIGGER_MIN_PROBE_SECONDS="${VOICE_AUTO_TRIGGER_MIN_PROBE_SECONDS:-1}"
 export VOICE_AUTO_TRIGGER_PROBE_WINDOW_SECONDS="${VOICE_AUTO_TRIGGER_PROBE_WINDOW_SECONDS:-1.5}"
@@ -201,6 +211,7 @@ export VOICE_AUTO_VAD_BACKEND="${VOICE_AUTO_VAD_BACKEND:-sherpa}"
 export VOICE_AUTO_SHERPA_VAD_MODEL="$VAD_MODEL"
 export VOICE_AUTO_TMUX_SESSION="$AUTO_TMUX_SESSION"
 export VOICE_AUTO_FOCUS_LOG="${VOICE_AUTO_FOCUS_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-focus.log}"
+export VOICE_READY_FILE="${VOICE_READY_FILE:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-${AUTO_READY_SESSION_NAME:-auto}-auto.ready}"
 
 case "${VOICE_AUTO_START_AGENT_WORKBENCH:-1}" in
   1|true|yes|on)

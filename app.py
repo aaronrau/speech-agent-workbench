@@ -11,6 +11,9 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import wave
 from collections import Counter
 from glob import glob
@@ -86,10 +89,25 @@ DEFAULT_CONFIG = {
     "auto_trigger_min_probe_seconds": 1.0,
     "auto_trigger_probe_window_seconds": 1.5,
     "auto_trigger_arm_timeout_seconds": 8.0,
-    "auto_trigger_aliases": [],
+    "auto_trigger_aliases": ["codex", "code x", "condex"],
     "auto_tmux_switch_session": None,
     "auto_tmux_switch_words": {},
     "auto_tmux_terminate_words": [],
+    "transcript_correction_backend": "off",
+    "transcript_correction_max_new_tokens": 96,
+    "transcript_correction_max_chars": 700,
+    "transcript_correction_apply_to_probes": False,
+    "transcript_correction_prompt": None,
+    "transcript_correction_llama_cpp_path": "llama-cli",
+    "transcript_correction_llama_cpp_server_path": "llama-server",
+    "transcript_correction_llama_cpp_server_url": "http://127.0.0.1:18087",
+    "transcript_correction_llama_cpp_server_autostart": True,
+    "transcript_correction_llama_cpp_server_startup_timeout": 60.0,
+    "transcript_correction_llama_cpp_model": (
+        "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q8_0.gguf"
+    ),
+    "transcript_correction_llama_cpp_gpu_layers": 99,
+    "transcript_correction_llama_cpp_timeout": 20.0,
     "submit_enter_delay_seconds": 0.5,
     "transcript_history_path": "transcript-history.txt",
 }
@@ -106,6 +124,9 @@ FASTER_WHISPER_MODEL_CACHE = {}
 NEMO_MODEL_CACHE = {}
 SHERPA_MODEL_CACHE = {}
 PARAKEET_ONNX_MODEL_CACHE = {}
+LLAMA_CPP_CORRECTOR_LOCK = threading.Lock()
+TRANSCRIPT_CORRECTION_FAILURES = set()
+LLAMA_CPP_SERVER_PROCESS = None
 ALLOWED_TRANSCRIPT_SYMBOLS = {".", "+"}
 
 
@@ -156,29 +177,35 @@ def split_trailing_submit_command(text):
 
 
 def extract_text_after_trigger_word(text, trigger_word, aliases=None):
-    trigger = str(trigger_word or "").strip()
-    if not text or not trigger:
+    trigger_words = [str(trigger_word or "").strip()]
+    trigger_words.extend(parse_word_list(aliases))
+    trigger_words = [word for word in trigger_words if word]
+    if not text or not trigger_words:
         return None
     stripped = str(text).strip()
-    pattern = rf"(?i)^{re.escape(trigger)}[.+]*(?:\s|$)"
-    match = re.search(pattern, stripped)
-    if not match:
-        return None
-    return stripped[match.end() :].strip()
+    for trigger in sorted(trigger_words, key=len, reverse=True):
+        pattern = rf"(?i)^{re.escape(trigger)}[.+]*(?:\s|$)"
+        match = re.search(pattern, stripped)
+        if match:
+            return stripped[match.end() :].strip()
+    return None
 
 
 def make_auto_trigger_session():
     return {
         "armed": False,
         "clicked": False,
+        "focus_failed": False,
         "armed_at": None,
         "source": None,
     }
 
 
-def arm_auto_trigger_session(session, source, now=None):
+def arm_auto_trigger_session(session, source, now=None, focus_success=True):
+    focused = bool(focus_success)
     session["armed"] = True
-    session["clicked"] = True
+    session["clicked"] = focused
+    session["focus_failed"] = not focused
     session["armed_at"] = time.monotonic() if now is None else now
     session["source"] = source
 
@@ -186,6 +213,7 @@ def arm_auto_trigger_session(session, source, now=None):
 def reset_auto_trigger_session(session):
     session["armed"] = False
     session["clicked"] = False
+    session["focus_failed"] = False
     session["armed_at"] = None
     session["source"] = None
 
@@ -226,6 +254,64 @@ def parse_word_list(value):
 def normalize_voice_command_text(text):
     words = re.findall(r"[A-Za-z0-9]+", str(text or "").lower())
     return " ".join(words)
+
+
+COMMON_CODING_TERM_CORRECTIONS = (
+    (re.compile(r"(?i)\bcon\s*dex\b"), "Codex"),
+    (re.compile(r"(?i)\bcode\s*x\b"), "Codex"),
+    (re.compile(r"(?i)\bcodec\b"), "Codex"),
+    (re.compile(r"(?i)\bkodex\b"), "Codex"),
+    (re.compile(r"(?i)\bt\s*mux\b"), "tmux"),
+    (re.compile(r"(?i)\btea\s*mux\b"), "tmux"),
+    (re.compile(r"(?i)\bgit\s*hub\b"), "GitHub"),
+    (re.compile(r"(?i)\blength\s+view\b"), "Langfuse"),
+    (re.compile(r"(?i)\blang\s+fuse\b"), "Langfuse"),
+    (re.compile(r"(?i)\bland\s+fuse\b"), "Langfuse"),
+    (re.compile(r"(?i)\blangfuse\b"), "Langfuse"),
+)
+
+
+COMMAND_TOKEN_ALIASES = {
+    "0": ("zero",),
+    "1": ("one", "won"),
+    "2": ("two", "to", "too"),
+    "3": ("three", "tree", "free"),
+    "4": ("four", "for"),
+    "5": ("five",),
+    "6": ("six",),
+    "7": ("seven",),
+    "8": ("eight",),
+    "9": ("nine",),
+    "one": ("1", "won"),
+    "two": ("2", "to", "too"),
+    "three": ("3", "tree", "free"),
+    "four": ("4", "for"),
+    "codex": ("code x", "condex", "codec", "kodex"),
+    "flux": ("flex", "flax"),
+    "forge": ("forage",),
+    "niles": ("miles", "nials", "nyles"),
+    "wolf": ("wulf", "wolfe"),
+}
+
+
+def correct_common_coding_terms(text):
+    corrected = str(text or "")
+    for pattern, replacement in COMMON_CODING_TERM_CORRECTIONS:
+        corrected = pattern.sub(replacement, corrected)
+    return corrected
+
+
+def build_command_text_aliases(command_text):
+    normalized = normalize_voice_command_text(command_text)
+    if not normalized:
+        return []
+    aliases = {normalized}
+    tokens = normalized.split()
+    for index, token in enumerate(tokens):
+        for alias in COMMAND_TOKEN_ALIASES.get(token, ()):
+            alias_tokens = tokens[:index] + alias.split() + tokens[index + 1 :]
+            aliases.add(" ".join(alias_tokens))
+    return sorted(aliases, key=lambda value: (-len(value.split()), value))
 
 
 def strip_voice_attention_words(words):
@@ -308,11 +394,13 @@ def build_auto_tmux_switch_commands(config):
         else:
             tmux_send_target = f"{session}:{target_name}"
             argv = ["tmux", "select-window", "-t", tmux_send_target]
-        commands[normalized] = {
+        command = {
             "label": spoken_name,
             "argv": argv,
             "tmux_send_target": tmux_send_target,
         }
+        for alias in build_command_text_aliases(normalized):
+            commands.setdefault(alias, command)
 
     terminate_value = os.environ.get("VOICE_AUTO_TMUX_TERMINATE_WORDS")
     if terminate_value is None:
@@ -324,12 +412,14 @@ def build_auto_tmux_switch_commands(config):
         normalized = normalize_voice_command_text(spoken_name)
         if not normalized:
             continue
-        commands[normalized] = {
+        command = {
             "label": spoken_name,
             "argv": ["tmux", "kill-session", "-t", session],
             "success_message": f"[auto] terminating tmux session: {session}",
             "exit_after": True,
         }
+        for alias in build_command_text_aliases(normalized):
+            commands.setdefault(alias, command)
     return commands
 
 
@@ -832,6 +922,8 @@ def signal_voice_ready(run_mode, transcribe_backend, model_label):
 
 
 def prompt_change_saved_value(label, description, current_value):
+    if not config_prompts_enabled():
+        return False
     print(f"{label}{description}: {current_value}")
     while True:
         choice = input(f"{label}Change {description}? [y/N] ").strip().lower()
@@ -840,6 +932,23 @@ def prompt_change_saved_value(label, description, current_value):
         if choice in ("y", "yes"):
             return True
         print("Enter y or n.")
+
+
+def config_prompts_enabled():
+    value = os.environ.get("VOICE_CONFIG_PROMPT")
+    if value is None:
+        value = os.environ.get("VOICE_DEVICE_PROMPT")
+    if value is None:
+        return True
+    return str(value).strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+        "none",
+        "null",
+        "off",
+    )
 
 
 def format_input_device(device):
@@ -1150,7 +1259,7 @@ def capture_hotkey_pynput():
 
 
 def select_evdev_device(devices, step_label=None):
-    if len(devices) == 1 or not sys.stdin.isatty():
+    if len(devices) == 1 or not sys.stdin.isatty() or not config_prompts_enabled():
         return devices[0]
     label = f"{step_label} " if step_label else ""
     print(f"{label}Select keyboard device for hotkey:")
@@ -1422,11 +1531,11 @@ def prompt_for_device(config_path, config, step_label=None):
         return config.get("device")
 
     saved_device = resolve_saved_input_device(config, devices)
-    if not sys.stdin.isatty():
+    if not sys.stdin.isatty() or not config_prompts_enabled():
         if saved_device is not None:
             save_config(config_path, config)
             return saved_device["index"]
-        print("[config] no TTY available; using default input device.")
+        print("[config] prompts disabled; using default input device.")
         return config.get("device")
 
     default_input = (
@@ -1505,8 +1614,8 @@ def prompt_for_device(config_path, config, step_label=None):
 
 
 def prompt_for_hotkey(config_path, config, backend, step_label=None, device=None):
-    if not sys.stdin.isatty():
-        print("[config] no TTY available; using hotkey from config.")
+    if not sys.stdin.isatty() or not config_prompts_enabled():
+        print("[config] prompts disabled; using hotkey from config.")
         return normalize_hotkey_name(config.get("hotkey"))
 
     label = f"{step_label} " if step_label else ""
@@ -2362,13 +2471,6 @@ def ensure_nemo_wav(wav_path, target_rate=16000):
     return wav_path, None
 
 
-def get_torch_device_for_model(model):
-    try:
-        return next(model.parameters()).device
-    except Exception:
-        return "cpu"
-
-
 def load_nemo_audio_tensor(wav_path, target_rate=16000, device=None):
     try:
         import torch
@@ -3197,6 +3299,536 @@ def transcribe_parakeet_onnx(model, wav_path):
                 os.unlink(cleanup_path)
             except OSError:
                 pass
+
+
+def get_transcript_correction_backend(config):
+    value = os.environ.get("VOICE_TRANSCRIPT_CORRECTION_BACKEND")
+    if value is None:
+        value = config.get("transcript_correction_backend", "off")
+    normalized = str(value or "").strip().lower()
+    if normalized in ("", "0", "false", "no", "none", "null", "off"):
+        return "off"
+    if normalized in (
+        "gemma",
+        "gemma4",
+        "gemma-4",
+        "llama",
+        "llamacpp",
+        "llama.cpp",
+        "llama-cpp",
+    ):
+        return "llama-cpp"
+    return normalized
+
+
+def get_transcript_correction_max_new_tokens(config):
+    return get_config_int(
+        config,
+        "VOICE_TRANSCRIPT_CORRECTION_MAX_NEW_TOKENS",
+        "transcript_correction_max_new_tokens",
+        96,
+        minimum=8,
+    )
+
+
+def get_transcript_correction_max_chars(config):
+    return get_config_int(
+        config,
+        "VOICE_TRANSCRIPT_CORRECTION_MAX_CHARS",
+        "transcript_correction_max_chars",
+        700,
+        minimum=40,
+    )
+
+
+def get_transcript_correction_llama_cpp_path(config):
+    return get_config_string(
+        config,
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_PATH",
+        "transcript_correction_llama_cpp_path",
+        "llama-cli",
+    )
+
+
+def get_transcript_correction_llama_cpp_server_path(config):
+    configured = get_config_string(
+        config,
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_SERVER_PATH",
+        "transcript_correction_llama_cpp_server_path",
+        "",
+    )
+    if configured:
+        return configured
+    binary_path = get_transcript_correction_llama_cpp_path(config)
+    if binary_path:
+        return os.path.join(os.path.dirname(binary_path), "llama-server")
+    return "llama-server"
+
+
+def get_transcript_correction_llama_cpp_server_url(config):
+    return get_config_string(
+        config,
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_SERVER_URL",
+        "transcript_correction_llama_cpp_server_url",
+        "http://127.0.0.1:18087",
+    ).rstrip("/")
+
+
+def transcript_correction_llama_cpp_server_autostart(config):
+    value = os.environ.get(
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_SERVER_AUTOSTART"
+    )
+    if value is None:
+        value = config.get(
+            "transcript_correction_llama_cpp_server_autostart",
+            True,
+        )
+    parsed = parse_bool(value)
+    return bool(parsed) if parsed is not None else True
+
+
+def get_transcript_correction_llama_cpp_server_startup_timeout(config):
+    return get_config_float(
+        config,
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_SERVER_STARTUP_TIMEOUT",
+        "transcript_correction_llama_cpp_server_startup_timeout",
+        60.0,
+        minimum=0.5,
+    )
+
+
+def get_transcript_correction_llama_cpp_model(config):
+    return get_config_string(
+        config,
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_MODEL",
+        "transcript_correction_llama_cpp_model",
+        DEFAULT_CONFIG["transcript_correction_llama_cpp_model"],
+    )
+
+
+def get_transcript_correction_llama_cpp_gpu_layers(config):
+    return get_config_int(
+        config,
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_GPU_LAYERS",
+        "transcript_correction_llama_cpp_gpu_layers",
+        99,
+        minimum=0,
+    )
+
+
+def get_transcript_correction_llama_cpp_timeout(config):
+    return get_config_float(
+        config,
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_TIMEOUT",
+        "transcript_correction_llama_cpp_timeout",
+        20.0,
+        minimum=0.5,
+    )
+
+
+def transcript_correction_applies_to_probes(config):
+    value = os.environ.get("VOICE_TRANSCRIPT_CORRECTION_APPLY_TO_PROBES")
+    if value is None:
+        value = config.get("transcript_correction_apply_to_probes", False)
+    parsed = parse_bool(value)
+    return bool(parsed) if parsed is not None else False
+
+
+def build_transcript_correction_messages(text, command_labels, config):
+    configured_prompt = os.environ.get("VOICE_TRANSCRIPT_CORRECTION_PROMPT")
+    if configured_prompt is None:
+        configured_prompt = config.get("transcript_correction_prompt")
+    system_prompt = str(
+        configured_prompt
+        or (
+            "You clean up speech-to-text output for a voice-controlled coding "
+            "agent workbench. Fix only obvious transcription mistakes. Preserve "
+            "the user's intent and command target. Prefer coding terms such as "
+            "Codex, tmux, Git, GitHub, Langfuse, npm, pnpm, pytest, Docker, "
+            "shell, branch, commit, diff, build, lint, and test when the raw "
+            "text sounds like them. If the first one to three raw words sound "
+            "like an available spoken routing target, replace them with that "
+            "exact target name. For example, if the available target is flux "
+            "and the raw text starts with flex, write Flux. "
+            "When the raw text sounds like length view, "
+            "lang fuse, or land fuse, write Langfuse. When the raw text sounds "
+            "like code x, condex, codec, or kodex, write Codex. Example: raw "
+            "transcript: send code x to length view. corrected transcript: "
+            "send Codex to Langfuse. Return only the corrected transcript on "
+            "one line."
+        )
+    )
+    labels = sorted({str(label).strip() for label in command_labels or [] if label})
+    target_text = ", ".join(labels[:24]) if labels else "none"
+    user_prompt = (
+        f"Available spoken routing targets: {target_text}\n"
+        f"Raw transcript: {text}\n"
+        "Corrected transcript:"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def strip_terminal_control_chars(text):
+    cleaned = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(text or ""))
+    while "\b" in cleaned:
+        updated = re.sub(r".\x08", "", cleaned)
+        if updated == cleaned:
+            cleaned = cleaned.replace("\b", "")
+            break
+        cleaned = updated
+    return "".join(
+        ch for ch in cleaned if ch in ("\n", "\t") or ord(ch) >= 32
+    )
+
+
+def parse_llama_cpp_response(output_text):
+    cleaned = strip_terminal_control_chars(output_text)
+    candidates = []
+    ignored_prefixes = (
+        "Loading model",
+        "build",
+        "model",
+        "modalities",
+        "using custom system prompt",
+        "available commands",
+        "/exit",
+        "/regen",
+        "/clear",
+        "/read",
+        "/glob",
+        "[ Prompt:",
+        "Exiting",
+    )
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = line.lstrip("|").strip()
+        if not line or line.startswith(">"):
+            continue
+        if any(line.startswith(prefix) for prefix in ignored_prefixes):
+            continue
+        if set(line) <= {"▄", "█", "▀", " "}:
+            continue
+        candidates.append(line)
+    return candidates[-1] if candidates else ""
+
+
+def resolve_local_runtime_path(path):
+    value = os.path.expanduser(str(path or "").strip())
+    if not value:
+        return ""
+    if os.path.isabs(value):
+        return value
+    if os.sep not in value:
+        found = shutil.which(value)
+        if found:
+            return found
+    root = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.join(root, value)
+    if os.path.exists(candidate):
+        return candidate
+    return value
+
+
+def add_binary_library_path(env, binary_path):
+    binary_dir = os.path.dirname(os.path.abspath(binary_path))
+    if not binary_dir:
+        return
+    existing_library_path = env.get("LD_LIBRARY_PATH")
+    if existing_library_path:
+        env["LD_LIBRARY_PATH"] = binary_dir + os.pathsep + existing_library_path
+    else:
+        env["LD_LIBRARY_PATH"] = binary_dir
+
+
+def llama_cpp_server_models_url(config):
+    return get_transcript_correction_llama_cpp_server_url(config) + "/v1/models"
+
+
+def llama_cpp_server_ready(config):
+    url = llama_cpp_server_models_url(config)
+    try:
+        with urllib.request.urlopen(
+            url,
+            timeout=min(2.0, get_transcript_correction_llama_cpp_timeout(config)),
+        ) as response:
+            return 200 <= int(getattr(response, "status", 200)) < 300
+    except Exception:
+        return False
+
+
+def wait_for_llama_cpp_server(config, process=None):
+    deadline = time.monotonic() + get_transcript_correction_llama_cpp_server_startup_timeout(config)
+    while time.monotonic() < deadline:
+        if llama_cpp_server_ready(config):
+            return True
+        if process is not None and process.poll() is not None:
+            return False
+        time.sleep(0.25)
+    return llama_cpp_server_ready(config)
+
+
+def ensure_llama_cpp_server(config):
+    global LLAMA_CPP_SERVER_PROCESS
+
+    if llama_cpp_server_ready(config):
+        return
+    if LLAMA_CPP_SERVER_PROCESS is not None:
+        if LLAMA_CPP_SERVER_PROCESS.poll() is None:
+            if wait_for_llama_cpp_server(config, LLAMA_CPP_SERVER_PROCESS):
+                return
+        LLAMA_CPP_SERVER_PROCESS = None
+
+    if not transcript_correction_llama_cpp_server_autostart(config):
+        raise RuntimeError("llama.cpp server is not running")
+
+    server_path = resolve_local_runtime_path(
+        get_transcript_correction_llama_cpp_server_path(config)
+    )
+    model_path = resolve_local_runtime_path(
+        get_transcript_correction_llama_cpp_model(config)
+    )
+    if not server_path or not os.path.isfile(server_path):
+        raise RuntimeError(f"llama.cpp server binary not found: {server_path}")
+    if not os.access(server_path, os.X_OK):
+        raise RuntimeError(f"llama.cpp server binary is not executable: {server_path}")
+    if not model_path or not os.path.isfile(model_path):
+        raise RuntimeError(f"llama.cpp transcript correction model not found: {model_path}")
+
+    parsed = urllib.parse.urlparse(
+        get_transcript_correction_llama_cpp_server_url(config)
+    )
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 18087
+    argv = [
+        server_path,
+        "-m",
+        model_path,
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "-ngl",
+        str(get_transcript_correction_llama_cpp_gpu_layers(config)),
+        "--ctx-size",
+        "2048",
+        "-n",
+        str(get_transcript_correction_max_new_tokens(config)),
+        "--jinja",
+        "--reasoning",
+        "off",
+        "--log-disable",
+        "--no-webui",
+    ]
+    env = os.environ.copy()
+    add_binary_library_path(env, server_path)
+    log_path = os.path.join(
+        os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(),
+        "speech-agent-workbench-llama-server.log",
+    )
+    log_handle = open(log_path, "a", encoding="utf-8")
+    try:
+        LLAMA_CPP_SERVER_PROCESS = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+    finally:
+        log_handle.close()
+    if not wait_for_llama_cpp_server(config, LLAMA_CPP_SERVER_PROCESS):
+        raise RuntimeError(
+            f"llama.cpp server did not become ready; see {log_path}"
+        )
+    print(
+        "[transcribe] llama.cpp server ready: "
+        + get_transcript_correction_llama_cpp_server_url(config)
+    )
+
+
+def correct_transcript_with_llama_cpp_server(text, config, command_labels=None):
+    ensure_llama_cpp_server(config)
+    messages = build_transcript_correction_messages(text, command_labels, config)
+    payload = {
+        "messages": messages,
+        "max_tokens": get_transcript_correction_max_new_tokens(config),
+        "temperature": 0,
+        "stream": False,
+    }
+    request = urllib.request.Request(
+        get_transcript_correction_llama_cpp_server_url(config)
+        + "/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(
+        request,
+        timeout=get_transcript_correction_llama_cpp_timeout(config),
+    ) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    choices = body.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return str(message.get("content") or "").strip()
+
+
+def correct_transcript_with_llama_cpp(text, config, command_labels=None):
+    binary_path = resolve_local_runtime_path(
+        get_transcript_correction_llama_cpp_path(config)
+    )
+    model_path = resolve_local_runtime_path(
+        get_transcript_correction_llama_cpp_model(config)
+    )
+    if not binary_path:
+        raise RuntimeError("llama.cpp transcript correction path is not configured")
+    if not model_path:
+        raise RuntimeError("llama.cpp transcript correction model is not configured")
+
+    messages = build_transcript_correction_messages(text, command_labels, config)
+    argv = [
+        binary_path,
+        "-m",
+        model_path,
+        "-cnv",
+        "-st",
+        "--jinja",
+        "--reasoning",
+        "off",
+        "-sys",
+        messages[0]["content"],
+        "-p",
+        messages[1]["content"],
+        "-n",
+        str(get_transcript_correction_max_new_tokens(config)),
+        "-ngl",
+        str(get_transcript_correction_llama_cpp_gpu_layers(config)),
+        "--temp",
+        "0",
+        "--seed",
+        "1",
+        "--no-display-prompt",
+        "--no-warmup",
+        "--no-show-timings",
+    ]
+    env = os.environ.copy()
+    add_binary_library_path(env, binary_path)
+    completed = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=get_transcript_correction_llama_cpp_timeout(config),
+        env=env,
+    )
+    output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+    if completed.returncode != 0:
+        tail = "\n".join(strip_terminal_control_chars(output).splitlines()[-8:])
+        raise RuntimeError(
+            f"llama.cpp transcript correction failed with exit "
+            f"{completed.returncode}: {tail}"
+        )
+    return parse_llama_cpp_response(output)
+
+
+def corrected_transcript_is_plausible(raw_text, corrected_text):
+    corrected = str(corrected_text or "").strip()
+    if not corrected:
+        return False
+    if is_likely_bad_transcript(corrected):
+        return False
+    raw = str(raw_text or "").strip()
+    if not raw:
+        return True
+    if len(corrected) > max(80, len(raw) * 3):
+        return False
+    raw_words = set(normalize_transcript_for_filter(raw).split())
+    corrected_words = set(normalize_transcript_for_filter(corrected).split())
+    if (
+        len(raw_words) >= 3
+        and corrected_words
+        and raw_words.isdisjoint(corrected_words)
+    ):
+        return False
+    return True
+
+
+def correct_transcript_text(text, config, command_labels=None, skip_model=False):
+    corrected = correct_common_coding_terms(text)
+    backend = get_transcript_correction_backend(config)
+    if backend == "off" or skip_model:
+        return sanitize_transcript_text(corrected)
+    if backend != "llama-cpp":
+        print(
+            f"[transcribe] unknown transcript correction backend '{backend}'; "
+            "using uncorrected transcript.",
+            file=sys.stderr,
+        )
+        return sanitize_transcript_text(corrected)
+    max_chars = get_transcript_correction_max_chars(config)
+    if len(corrected) > max_chars:
+        return sanitize_transcript_text(corrected)
+
+    failure_key = (backend, get_transcript_correction_llama_cpp_model(config))
+    if failure_key in TRANSCRIPT_CORRECTION_FAILURES:
+        return sanitize_transcript_text(corrected)
+
+    try:
+        with LLAMA_CPP_CORRECTOR_LOCK:
+            try:
+                model_text = correct_transcript_with_llama_cpp_server(
+                    corrected,
+                    config,
+                    command_labels=command_labels,
+                )
+            except Exception as server_exc:
+                if transcript_correction_llama_cpp_server_autostart(config):
+                    print(
+                        "[transcribe] llama.cpp server unavailable; "
+                        f"falling back to one-shot CLI: {server_exc}",
+                        file=sys.stderr,
+                    )
+                model_text = correct_transcript_with_llama_cpp(
+                    corrected,
+                    config,
+                    command_labels=command_labels,
+                )
+    except Exception as exc:
+        TRANSCRIPT_CORRECTION_FAILURES.add(failure_key)
+        print(
+            f"[transcribe] transcript correction disabled after error: {exc}",
+            file=sys.stderr,
+        )
+        return sanitize_transcript_text(corrected)
+
+    if corrected_transcript_is_plausible(corrected, model_text):
+        return sanitize_transcript_text(correct_common_coding_terms(model_text))
+    return sanitize_transcript_text(corrected)
+
+
+def start_transcript_correction_server_background(config):
+    if get_transcript_correction_backend(config) != "llama-cpp":
+        return
+    if not transcript_correction_llama_cpp_server_autostart(config):
+        return
+
+    def worker():
+        try:
+            with LLAMA_CPP_CORRECTOR_LOCK:
+                ensure_llama_cpp_server(config)
+        except Exception as exc:
+            print(
+                f"[transcribe] llama.cpp server background start failed: {exc}",
+                file=sys.stderr,
+            )
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
 
 
 def build_transcriber(
@@ -4971,6 +5603,16 @@ def main():
         auto_trigger_alias_value = config.get("auto_trigger_aliases", [])
     auto_trigger_aliases = parse_word_list(auto_trigger_alias_value)
     auto_shell_commands = build_auto_tmux_switch_commands(config)
+    auto_command_labels = sorted(
+        {
+            str(command.get("label") or "").strip()
+            for command in auto_shell_commands.values()
+            if command.get("label")
+        }
+    )
+    transcript_correction_command_labels = (
+        auto_command_labels + [auto_trigger_word] + auto_trigger_aliases
+    )
     auto_pre_roll_seconds = get_config_float(
         config,
         "VOICE_AUTO_PRE_ROLL_SECONDS",
@@ -4993,6 +5635,7 @@ def main():
         minimum=1.0,
     )
     auto_vad_detector = build_sherpa_vad(config, sample_rate)
+    start_transcript_correction_server_background(config)
     signal_voice_ready(run_mode, transcribe_backend, _transcribe_model_label)
 
     def render_meter(level, width=24):
@@ -5176,7 +5819,15 @@ def main():
                 os.unlink(wav_path)
             except OSError:
                 pass
-        text = sanitize_transcript_text(text)
+        skip_model_correction = bool(
+            session_state.get("skip_transcript_correction")
+        ) and not transcript_correction_applies_to_probes(config)
+        text = correct_transcript_text(
+            text,
+            config,
+            command_labels=transcript_correction_command_labels,
+            skip_model=skip_model_correction,
+        )
         if is_likely_bad_transcript(text):
             if text:
                 print(f"[{log_prefix}] rejected suspicious transcript: {text!r}")
@@ -5265,6 +5916,14 @@ def main():
                     "fallback recording."
                 )
                 return
+            if not text:
+                print("[hotkey] no speech detected.")
+                return
+            text = correct_transcript_text(
+                text,
+                config,
+                command_labels=transcript_correction_command_labels,
+            )
             if text and config.get("paste_append_space"):
                 text = text.rstrip() + " "
             if not text:
@@ -5500,13 +6159,19 @@ def main():
 
     def click_auto_trigger_target(source="trigger"):
         print(f"[auto] trigger '{auto_trigger_word}' detected; clicking target...")
-        if not click_mouse_left():
+        focus_success = click_mouse_left()
+        if not focus_success:
             print(
                 "[auto] unable to left-click automatically; "
                 "continuing with current focus.",
                 file=sys.stderr,
             )
-        arm_auto_trigger_session(auto_trigger_session, source)
+        arm_auto_trigger_session(
+            auto_trigger_session,
+            source,
+            focus_success=focus_success,
+        )
+        return focus_success
 
     def reset_auto_vad():
         if auto_vad_detector is not None:
@@ -5532,6 +6197,7 @@ def main():
         if samples.size == 0:
             return False
         session_state = select_auto_transcriber()
+        session_state["skip_transcript_correction"] = True
         text = transcribe_sample_block(session_state, samples, chunk_index).strip()
         if not text:
             return False
@@ -5556,8 +6222,7 @@ def main():
         if queued_text is None:
             print(f"[auto] probe did not hear '{auto_trigger_word}'.")
             return False
-        click_auto_trigger_target(source="probe")
-        return True
+        return click_auto_trigger_target(source="probe")
 
     def wait_for_auto_utterance():
         frame_size = max(1, int(sample_rate * max(vad_frame_ms, 1) / 1000.0))
@@ -5686,6 +6351,11 @@ def main():
         command_prefix = match_auto_shell_command_prefix(text, auto_shell_commands)
         if command_prefix is not None:
             shell_command, queued_text = command_prefix
+            if auto_trigger_session.get("focus_failed"):
+                print(
+                    "[auto] focus fallback matched agent name in corrected "
+                    "transcript."
+                )
             reset_auto_trigger_session(auto_trigger_session)
             if not run_auto_shell_command(shell_command):
                 print_auto_waiting()
@@ -5759,6 +6429,14 @@ def main():
             return
         if not trigger_clicked and not auto_trigger_session["clicked"]:
             click_auto_trigger_target()
+        if auto_trigger_session.get("focus_failed"):
+            print(
+                "[auto] focus was not confirmed and the corrected transcript "
+                "did not start with an agent name; not pasting."
+            )
+            reset_auto_trigger_session(auto_trigger_session)
+            print_auto_waiting()
+            return
         if not queued_text:
             if auto_trigger_session.get("source") == "probe":
                 print(
@@ -5814,7 +6492,10 @@ def main():
         if auto_shell_commands:
             print_auto_waiting()
             labels = sorted(
-                command["label"] for command in auto_shell_commands.values()
+                {
+                    command["label"]
+                    for command in auto_shell_commands.values()
+                }
             )
             print(
                 "[auto] switch words="
