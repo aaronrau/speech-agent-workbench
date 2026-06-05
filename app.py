@@ -535,7 +535,11 @@ def format_colored_detection_words():
     )
 
 
-def append_transcript_history(text, history_path):
+def compact_history_text(value):
+    return " ".join(str(value or "").split())
+
+
+def append_transcript_history(text, history_path, correction=None):
     if not history_path:
         return False
     transcript = str(text or "")
@@ -547,8 +551,27 @@ def append_transcript_history(text, history_path):
         if directory:
             os.makedirs(directory, exist_ok=True)
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        payload = transcript
+        if correction:
+            payload_record = {"text": compact_history_text(transcript)}
+            for key in (
+                "raw_transcript",
+                "pre_llm_transcript",
+                "corrected_transcript",
+                "correction_backend",
+                "model_output",
+                "model_accepted",
+                "model_skipped",
+                "fallback_reason",
+            ):
+                if key in correction and correction[key] is not None:
+                    value = correction[key]
+                    if isinstance(value, str):
+                        value = compact_history_text(value)
+                    payload_record[key] = value
+            payload = json.dumps(payload_record, sort_keys=True)
         with open(path, "a", encoding="utf-8") as handle:
-            handle.write(f"{timestamp}\t{transcript}\n")
+            handle.write(f"{timestamp}\t{payload}\n")
     except OSError as exc:
         print(f"[history] failed to append transcript: {exc}", file=sys.stderr)
         return False
@@ -3786,25 +3809,99 @@ def corrected_transcript_is_plausible(raw_text, corrected_text):
     return True
 
 
-def correct_transcript_text(text, config, command_labels=None, skip_model=False):
-    corrected = correct_common_coding_terms(text)
+def make_transcript_correction_details(
+    raw_text,
+    pre_llm_text,
+    corrected_text,
+    backend,
+    model_output=None,
+    model_accepted=None,
+    model_skipped=False,
+    fallback_reason=None,
+):
+    return {
+        "raw_transcript": compact_history_text(raw_text),
+        "pre_llm_transcript": compact_history_text(pre_llm_text),
+        "corrected_transcript": compact_history_text(corrected_text),
+        "correction_backend": backend,
+        "model_output": compact_history_text(model_output)
+        if model_output is not None
+        else None,
+        "model_accepted": model_accepted,
+        "model_skipped": bool(model_skipped),
+        "fallback_reason": fallback_reason,
+    }
+
+
+def combine_transcript_correction_details(chunk_details, final_details):
+    chunks = [detail for detail in chunk_details or [] if detail]
+    if not chunks:
+        return final_details
+    combined = dict(final_details or {})
+    combined["raw_transcript"] = " ".join(
+        compact_history_text(detail.get("raw_transcript"))
+        for detail in chunks
+        if detail.get("raw_transcript")
+    ).strip()
+    combined["pre_llm_transcript"] = " ".join(
+        compact_history_text(detail.get("pre_llm_transcript"))
+        for detail in chunks
+        if detail.get("pre_llm_transcript")
+    ).strip()
+    return combined
+
+
+def correct_transcript_details(text, config, command_labels=None, skip_model=False):
+    raw_text = str(text or "")
+    corrected = correct_common_coding_terms(raw_text)
     backend = get_transcript_correction_backend(config)
     if backend == "off" or skip_model:
-        return sanitize_transcript_text(corrected)
+        final_text = sanitize_transcript_text(corrected)
+        return make_transcript_correction_details(
+            raw_text,
+            corrected,
+            final_text,
+            backend,
+            model_skipped=True,
+        )
     if backend != "llama-cpp":
         print(
             f"[transcribe] unknown transcript correction backend '{backend}'; "
             "using uncorrected transcript.",
             file=sys.stderr,
         )
-        return sanitize_transcript_text(corrected)
+        final_text = sanitize_transcript_text(corrected)
+        return make_transcript_correction_details(
+            raw_text,
+            corrected,
+            final_text,
+            backend,
+            model_skipped=True,
+            fallback_reason="unknown_backend",
+        )
     max_chars = get_transcript_correction_max_chars(config)
     if len(corrected) > max_chars:
-        return sanitize_transcript_text(corrected)
+        final_text = sanitize_transcript_text(corrected)
+        return make_transcript_correction_details(
+            raw_text,
+            corrected,
+            final_text,
+            backend,
+            model_skipped=True,
+            fallback_reason="max_chars",
+        )
 
     failure_key = (backend, get_transcript_correction_llama_cpp_model(config))
     if failure_key in TRANSCRIPT_CORRECTION_FAILURES:
-        return sanitize_transcript_text(corrected)
+        final_text = sanitize_transcript_text(corrected)
+        return make_transcript_correction_details(
+            raw_text,
+            corrected,
+            final_text,
+            backend,
+            model_skipped=True,
+            fallback_reason="previous_failure",
+        )
 
     try:
         with LLAMA_CPP_CORRECTOR_LOCK:
@@ -3832,11 +3929,47 @@ def correct_transcript_text(text, config, command_labels=None, skip_model=False)
             f"[transcribe] transcript correction disabled after error: {exc}",
             file=sys.stderr,
         )
-        return sanitize_transcript_text(corrected)
+        final_text = sanitize_transcript_text(corrected)
+        return make_transcript_correction_details(
+            raw_text,
+            corrected,
+            final_text,
+            backend,
+            model_output=None,
+            model_accepted=False,
+            model_skipped=True,
+            fallback_reason="model_error",
+        )
 
     if corrected_transcript_is_plausible(corrected, model_text):
-        return sanitize_transcript_text(correct_common_coding_terms(model_text))
-    return sanitize_transcript_text(corrected)
+        final_text = sanitize_transcript_text(correct_common_coding_terms(model_text))
+        return make_transcript_correction_details(
+            raw_text,
+            corrected,
+            final_text,
+            backend,
+            model_output=model_text,
+            model_accepted=True,
+        )
+    final_text = sanitize_transcript_text(corrected)
+    return make_transcript_correction_details(
+        raw_text,
+        corrected,
+        final_text,
+        backend,
+        model_output=model_text,
+        model_accepted=False,
+        fallback_reason="implausible_model_output",
+    )
+
+
+def correct_transcript_text(text, config, command_labels=None, skip_model=False):
+    return correct_transcript_details(
+        text,
+        config,
+        command_labels=command_labels,
+        skip_model=skip_model,
+    )["corrected_transcript"]
 
 
 def start_transcript_correction_server_background(config):
@@ -5178,7 +5311,7 @@ def paste_text(text):
         PASTE_IN_PROGRESS.clear()
 
 
-def paste_transcript_text(text, history_path=None):
+def paste_transcript_text(text, history_path=None, correction=None):
     text, send_enter = split_trailing_submit_command(text)
     if not text and not send_enter:
         return False, text, send_enter
@@ -5190,7 +5323,7 @@ def paste_transcript_text(text, history_path=None):
             if delay:
                 time.sleep(delay)
             if type_text_and_submit(text):
-                append_transcript_history(text, history_path)
+                append_transcript_history(text, history_path, correction=correction)
                 return True, text, send_enter
             return False, text, send_enter
         finally:
@@ -5213,7 +5346,7 @@ def paste_transcript_text(text, history_path=None):
         finally:
             PASTE_IN_PROGRESS.clear()
 
-    append_transcript_history(text, history_path)
+    append_transcript_history(text, history_path, correction=correction)
     return True, text, send_enter
 
 
@@ -5850,17 +5983,20 @@ def main():
         skip_model_correction = bool(
             session_state.get("skip_transcript_correction")
         ) and not transcript_correction_applies_to_probes(config)
-        text = correct_transcript_text(
+        correction = correct_transcript_details(
             text,
             config,
             command_labels=transcript_correction_command_labels,
             skip_model=skip_model_correction,
         )
+        text = correction["corrected_transcript"]
         if is_likely_bad_transcript(text):
             if text:
                 print(f"[{log_prefix}] rejected suspicious transcript: {text!r}")
             return ""
         if text:
+            session_state["last_transcript_correction"] = correction
+            session_state.setdefault("transcript_corrections", []).append(correction)
             print(f"[{log_prefix}] chunk {chunk_index + 1} -> {text}")
         return text
 
@@ -5947,10 +6083,15 @@ def main():
             if not text:
                 print("[hotkey] no speech detected.")
                 return
-            text = correct_transcript_text(
+            final_correction = correct_transcript_details(
                 text,
                 config,
                 command_labels=transcript_correction_command_labels,
+            )
+            text = final_correction["corrected_transcript"]
+            history_correction = combine_transcript_correction_details(
+                session_state.get("transcript_corrections", []),
+                final_correction,
             )
             if text and config.get("paste_append_space"):
                 text = text.rstrip() + " "
@@ -5961,6 +6102,7 @@ def main():
             pasted, pasted_text, sent_enter = paste_transcript_text(
                 text,
                 transcript_history_path,
+                correction=history_correction,
             )
             paste_ms = (time.perf_counter() - paste_started) * 1000
             if pasted_text:
@@ -6045,6 +6187,7 @@ def main():
             "next_sample": 0,
             "chunk_count": 0,
             "chunk_results": [],
+            "transcript_corrections": [],
             "error": None,
             "recording_id": recording_id,
             "stop_event": threading.Event(),
@@ -6372,6 +6515,7 @@ def main():
     def transcribe_and_paste_auto(samples, trigger_clicked=False):
         session_state = select_auto_transcriber()
         text = transcribe_sample_block(session_state, samples, 0).strip()
+        history_correction = session_state.get("last_transcript_correction")
         if not text:
             print("[auto] no speech detected.")
             print_auto_waiting()
@@ -6413,7 +6557,11 @@ def main():
             if not pasted:
                 report_paste_failure(queued_text)
             else:
-                append_transcript_history(queued_text, transcript_history_path)
+                append_transcript_history(
+                    queued_text,
+                    transcript_history_path,
+                    correction=history_correction,
+                )
                 print(
                     f"[auto] {paste_action} in "
                     f"{paste_ms:.1f} ms: {queued_text}"
@@ -6497,7 +6645,11 @@ def main():
         if not pasted:
             report_paste_failure(queued_text)
         else:
-            append_transcript_history(queued_text, transcript_history_path)
+            append_transcript_history(
+                queued_text,
+                transcript_history_path,
+                correction=history_correction,
+            )
             reset_auto_trigger_session(auto_trigger_session)
             print(f"[auto] typed and pressed enter in {paste_ms:.1f} ms: {queued_text}")
         print_auto_waiting()

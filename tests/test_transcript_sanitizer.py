@@ -11,6 +11,7 @@ from app import (
     build_auto_tmux_switch_commands,
     build_sherpa_vad,
     correct_common_coding_terms,
+    correct_transcript_details,
     correct_transcript_text,
     extract_text_after_trigger_word,
     format_colored_detection_words,
@@ -363,6 +364,42 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         server.assert_called_once()
         run.assert_not_called()
 
+    def test_correct_transcript_details_records_raw_and_corrected_text(self):
+        config = {
+            "transcript_correction_backend": "llama.cpp",
+            "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
+            "transcript_correction_max_new_tokens": 32,
+        }
+
+        app.TRANSCRIPT_CORRECTION_FAILURES.clear()
+        with mock.patch.object(
+            app,
+            "correct_transcript_with_llama_cpp_server",
+            return_value="ask Langfuse to inspect the Codex trace",
+        ):
+            details = correct_transcript_details(
+                "ask length view to inspect code x trace",
+                config,
+            )
+
+        self.assertEqual(
+            details["raw_transcript"],
+            "ask length view to inspect code x trace",
+        )
+        self.assertEqual(
+            details["pre_llm_transcript"],
+            "ask Langfuse to inspect Codex trace",
+        )
+        self.assertEqual(
+            details["corrected_transcript"],
+            "ask Langfuse to inspect the Codex trace",
+        )
+        self.assertEqual(
+            details["model_output"],
+            "ask Langfuse to inspect the Codex trace",
+        )
+        self.assertTrue(details["model_accepted"])
+
     def test_auto_tmux_switch_commands_include_configured_terminate_commands(self):
         with mock.patch.dict(
             "os.environ",
@@ -629,6 +666,41 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             [line.split("\t", 1)[1] for line in lines],
             ["first transcript", "second transcript"],
         )
+
+    def test_append_transcript_history_can_store_correction_details(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "history.txt")
+
+            self.assertTrue(
+                append_transcript_history(
+                    "inspect the trace",
+                    path,
+                    correction={
+                        "raw_transcript": "flux inspect length view trace",
+                        "pre_llm_transcript": "flux inspect Langfuse trace",
+                        "corrected_transcript": "Flux inspect Langfuse trace",
+                        "correction_backend": "llama-cpp",
+                        "model_output": "Flux inspect Langfuse trace",
+                        "model_accepted": True,
+                    },
+                )
+            )
+
+            with open(path, "r", encoding="utf-8") as handle:
+                line = handle.read().strip()
+
+        _timestamp, payload = line.split("\t", 1)
+        record = json.loads(payload)
+        self.assertEqual(record["text"], "inspect the trace")
+        self.assertEqual(
+            record["raw_transcript"],
+            "flux inspect length view trace",
+        )
+        self.assertEqual(
+            record["corrected_transcript"],
+            "Flux inspect Langfuse trace",
+        )
+        self.assertTrue(record["model_accepted"])
 
     def test_get_transcript_history_path_can_be_disabled(self):
         with mock.patch.dict("os.environ", {}, clear=True):

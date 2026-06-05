@@ -93,6 +93,11 @@ If no server can be reached or started, it falls back to one-shot `llama-cli`.
 Use a `llama-cli`/`llama-server` pair built from the same llama.cpp build, for
 example a local ROCm/HIP build plus a compatible GGUF model.
 
+Successful pasted or tmux-sent utterances are appended to
+`transcript-history.txt`. When transcript correction details are available, the
+history payload is JSON and includes `raw_transcript`, `pre_llm_transcript`,
+and `corrected_transcript` alongside the final `text` that was sent.
+
 ### Optional Terminate Command
 
 Voice commands that kill the tmux workbench are disabled by default because STT
