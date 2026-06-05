@@ -269,6 +269,14 @@ COMMON_CODING_TERM_CORRECTIONS = (
     (re.compile(r"(?i)\blang\s+fuse\b"), "Langfuse"),
     (re.compile(r"(?i)\bland\s+fuse\b"), "Langfuse"),
     (re.compile(r"(?i)\blangfuse\b"), "Langfuse"),
+    (
+        re.compile(r"(?i)\b(?:w)?hen\s+all\s+the\s+chains\s+push(?:ed)?\s+to\s+death\b"),
+        "did all the changes get pushed to dev",
+    ),
+    (
+        re.compile(r"(?i)\bdid\s+all\s+the\s+change\s+got\s+pushed\s+to\s+dev\b"),
+        "did all the changes get pushed to dev",
+    ),
 )
 
 
@@ -3503,7 +3511,10 @@ def build_transcript_correction_messages(text, command_labels, config):
             "and the raw text starts with flex, write Flux. "
             "When the raw text sounds like length view, "
             "lang fuse, or land fuse, write Langfuse. When the raw text sounds "
-            "like code x, condex, codec, or kodex, write Codex. Example: raw "
+            "like code x, condex, codec, or kodex, write Codex. When the raw "
+            "text sounds like hen all the chains push to death, or did all the "
+            "change got pushed to dev, write did all the changes get pushed to "
+            "dev. Example: raw "
             "transcript: send code x to length view. corrected transcript: "
             "send Codex to Langfuse. Return only the corrected transcript on "
             "one line."

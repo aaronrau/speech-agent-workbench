@@ -277,6 +277,16 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             "open the Langfuse trace",
         )
 
+    def test_correct_common_coding_terms_fixes_dev_push_phrase(self):
+        self.assertEqual(
+            correct_common_coding_terms("hen all the chains push to death"),
+            "did all the changes get pushed to dev",
+        )
+        self.assertEqual(
+            correct_common_coding_terms("did all the change got pushed to dev"),
+            "did all the changes get pushed to dev",
+        )
+
     def test_correct_transcript_text_uses_common_terms_when_model_disabled(self):
         self.assertEqual(
             correct_transcript_text(
