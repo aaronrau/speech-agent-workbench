@@ -114,7 +114,9 @@ in your local `config.json`:
 ```
 
 Terminate commands require an exact phrase match and are not used for
-agent-prefixed message routing.
+agent-prefixed message routing. `terminate session`, `terminates session`,
+`terminate sessions`, and `terminates sessions` variants are expanded from one
+configured terminate phrase.
 
 ### Voice-Friendly Names
 

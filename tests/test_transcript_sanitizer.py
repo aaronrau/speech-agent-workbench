@@ -457,6 +457,30 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertIn("voice", commands)
         self.assertNotIn("voice terminate session", commands)
 
+    def test_auto_tmux_terminate_commands_expand_session_variants(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "VOICE_AUTO_TMUX_SESSION": "speech-agent-workbench",
+                "VOICE_AUTO_TMUX_SWITCHES": "voice=pane:%4",
+                "VOICE_AUTO_ENABLE_TERMINATE_COMMANDS": "1",
+                "VOICE_AUTO_TMUX_TERMINATE_WORDS": (
+                    "voice confirm terminate session"
+                ),
+            },
+            clear=True,
+        ):
+            commands = build_auto_tmux_switch_commands({})
+
+        command = commands["voice confirm terminate session"]
+        for label in (
+            "voice confirm terminates session",
+            "voice confirm terminate sessions",
+            "voice confirm terminates sessions",
+        ):
+            self.assertEqual(commands[label]["argv"], command["argv"])
+            self.assertFalse(commands[label]["allow_prefix"])
+
     def test_match_auto_shell_command_accepts_exact_switch_word(self):
         commands = {"agent two": {"label": "agent two", "argv": ["tmux"]}}
 

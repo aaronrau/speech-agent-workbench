@@ -323,6 +323,23 @@ def build_command_text_aliases(command_text):
     return sorted(aliases, key=lambda value: (-len(value.split()), value))
 
 
+def build_terminate_command_text_aliases(command_text):
+    aliases = set(build_command_text_aliases(command_text))
+    for alias in list(aliases):
+        tokens = alias.split()
+        if len(tokens) < 2:
+            continue
+        if tokens[-2] not in ("terminate", "terminates"):
+            continue
+        if tokens[-1] not in ("session", "sessions"):
+            continue
+        prefix = tokens[:-2]
+        for verb in ("terminate", "terminates"):
+            for noun in ("session", "sessions"):
+                aliases.add(" ".join(prefix + [verb, noun]))
+    return sorted(aliases, key=lambda value: (-len(value.split()), value))
+
+
 def strip_voice_attention_words(words):
     attention_words = {"hey", "hi", "ok", "okay", "please"}
     index = 0
@@ -452,7 +469,7 @@ def build_auto_tmux_switch_commands(config):
                 "exit_after": True,
                 "allow_prefix": False,
             }
-            for alias in build_command_text_aliases(normalized):
+            for alias in build_terminate_command_text_aliases(normalized):
                 commands.setdefault(alias, command)
     return commands
 
