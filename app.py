@@ -95,7 +95,7 @@ DEFAULT_CONFIG = {
     "auto_enable_terminate_commands": False,
     "auto_tmux_terminate_words": [],
     "transcript_correction_backend": "off",
-    "transcript_correction_max_new_tokens": 96,
+    "transcript_correction_max_new_tokens": 256,
     "transcript_correction_max_chars": 700,
     "transcript_correction_apply_to_probes": False,
     "transcript_correction_prompt": None,

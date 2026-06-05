@@ -83,7 +83,7 @@ settings in `config.json`, which is git-ignored.
   "transcript_correction_llama_cpp_server_autostart": true,
   "transcript_correction_llama_cpp_model": "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q8_0.gguf",
   "transcript_correction_llama_cpp_gpu_layers": 99,
-  "transcript_correction_max_new_tokens": 32
+  "transcript_correction_max_new_tokens": 256
 }
 ```
 

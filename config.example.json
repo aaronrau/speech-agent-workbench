@@ -57,7 +57,7 @@
   "transcript_correction_apply_to_probes": false,
   "transcript_correction_backend": "off",
   "transcript_correction_max_chars": 700,
-  "transcript_correction_max_new_tokens": 96,
+  "transcript_correction_max_new_tokens": 256,
   "transcript_correction_prompt": null,
   "transcript_correction_llama_cpp_path": "llama-cli",
   "transcript_correction_llama_cpp_server_path": "llama-server",
