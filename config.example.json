@@ -56,6 +56,7 @@
   "transcribe_backend": "parakeet-onnx",
   "transcript_correction_apply_to_probes": false,
   "transcript_correction_backend": "off",
+  "transcript_correction_console_log": true,
   "transcript_correction_max_chars": 700,
   "transcript_correction_max_new_tokens": 256,
   "transcript_correction_prompt": null,

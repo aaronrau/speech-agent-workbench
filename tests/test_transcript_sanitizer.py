@@ -322,6 +322,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             "transcript_correction_llama_cpp_gpu_layers": 99,
             "transcript_correction_llama_cpp_timeout": 3.0,
             "transcript_correction_max_new_tokens": 32,
+            "transcript_correction_console_log": False,
         }
 
         app.TRANSCRIPT_CORRECTION_FAILURES.clear()
@@ -352,6 +353,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             "transcript_correction_backend": "llama.cpp",
             "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
             "transcript_correction_max_new_tokens": 32,
+            "transcript_correction_console_log": False,
         }
 
         app.TRANSCRIPT_CORRECTION_FAILURES.clear()
@@ -379,6 +381,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             "transcript_correction_backend": "llama.cpp",
             "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
             "transcript_correction_max_new_tokens": 32,
+            "transcript_correction_console_log": False,
         }
 
         app.TRANSCRIPT_CORRECTION_FAILURES.clear()
@@ -409,6 +412,50 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             "ask Langfuse to inspect the Codex trace",
         )
         self.assertTrue(details["model_accepted"])
+
+    def test_correct_transcript_details_logs_llama_cpp_translation(self):
+        config = {
+            "transcript_correction_backend": "llama.cpp",
+            "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
+            "transcript_correction_max_new_tokens": 32,
+            "transcript_correction_console_log": True,
+        }
+
+        app.TRANSCRIPT_CORRECTION_FAILURES.clear()
+        with mock.patch.object(
+            app,
+            "correct_transcript_with_llama_cpp_server",
+            return_value="Hey Flux check the deploy status",
+        ):
+            with mock.patch("builtins.print") as printed:
+                details = correct_transcript_details(
+                    "Hey Flex check the deploy status",
+                    config,
+                    command_labels=["flux"],
+                )
+
+        self.assertEqual(
+            details["corrected_transcript"],
+            "Hey Flux check the deploy status",
+        )
+        lines = [
+            " ".join(str(arg) for arg in call.args)
+            for call in printed.call_args_list
+        ]
+        self.assertTrue(
+            any(
+                line.startswith("[transcribe] transcript correction raw:")
+                and "Hey Flex check the deploy status" in line
+                for line in lines
+            )
+        )
+        self.assertTrue(
+            any(
+                line.startswith("[transcribe] transcript correction llama.cpp accepted:")
+                and "Hey Flux check the deploy status" in line
+                for line in lines
+            )
+        )
 
     def test_auto_tmux_switch_commands_include_configured_terminate_commands(self):
         with mock.patch.dict(

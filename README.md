@@ -97,6 +97,10 @@ Successful pasted or tmux-sent utterances are appended to
 `transcript-history.txt`. When transcript correction details are available, the
 history payload is JSON and includes `raw_transcript`, `pre_llm_transcript`,
 and `corrected_transcript` alongside the final `text` that was sent.
+The console also logs the raw STT text, pre-LLM cleanup text, llama.cpp output,
+and final accepted text by default. Set
+`VOICE_TRANSCRIPT_CORRECTION_CONSOLE_LOG=0` or
+`"transcript_correction_console_log": false` to disable that console output.
 
 ### Optional Terminate Command
 

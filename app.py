@@ -97,6 +97,7 @@ DEFAULT_CONFIG = {
     "transcript_correction_backend": "off",
     "transcript_correction_max_new_tokens": 256,
     "transcript_correction_max_chars": 700,
+    "transcript_correction_console_log": True,
     "transcript_correction_apply_to_probes": False,
     "transcript_correction_prompt": None,
     "transcript_correction_llama_cpp_path": "llama-cli",
@@ -3510,6 +3511,14 @@ def transcript_correction_applies_to_probes(config):
     return bool(parsed) if parsed is not None else False
 
 
+def transcript_correction_console_log_enabled(config):
+    value = os.environ.get("VOICE_TRANSCRIPT_CORRECTION_CONSOLE_LOG")
+    if value is None:
+        value = config.get("transcript_correction_console_log", True)
+    parsed = parse_bool(value)
+    return bool(parsed) if parsed is not None else True
+
+
 def build_transcript_correction_messages(text, command_labels, config):
     configured_prompt = os.environ.get("VOICE_TRANSCRIPT_CORRECTION_PROMPT")
     if configured_prompt is None:
@@ -3861,6 +3870,47 @@ def make_transcript_correction_details(
     }
 
 
+def truncate_transcript_log_text(value, limit=500):
+    text = compact_history_text(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def log_transcript_correction_details(config, details):
+    if not transcript_correction_console_log_enabled(config):
+        return
+    if not details or details.get("correction_backend") != "llama-cpp":
+        return
+    print(
+        "[transcribe] transcript correction raw: "
+        + truncate_transcript_log_text(details.get("raw_transcript"))
+    )
+    print(
+        "[transcribe] transcript correction pre-llm: "
+        + truncate_transcript_log_text(details.get("pre_llm_transcript"))
+    )
+    model_output = details.get("model_output")
+    if details.get("model_skipped"):
+        reason = details.get("fallback_reason") or "skipped"
+        print(f"[transcribe] transcript correction llama.cpp skipped: {reason}")
+    elif model_output is not None:
+        status = "accepted" if details.get("model_accepted") else "rejected"
+        print(
+            f"[transcribe] transcript correction llama.cpp {status}: "
+            + truncate_transcript_log_text(model_output)
+        )
+    print(
+        "[transcribe] transcript correction final: "
+        + truncate_transcript_log_text(details.get("corrected_transcript"))
+    )
+
+
+def finalize_transcript_correction_details(config, details):
+    log_transcript_correction_details(config, details)
+    return details
+
+
 def combine_transcript_correction_details(chunk_details, final_details):
     chunks = [detail for detail in chunk_details or [] if detail]
     if not chunks:
@@ -3885,12 +3935,15 @@ def correct_transcript_details(text, config, command_labels=None, skip_model=Fal
     backend = get_transcript_correction_backend(config)
     if backend == "off" or skip_model:
         final_text = sanitize_transcript_text(corrected)
-        return make_transcript_correction_details(
-            raw_text,
-            corrected,
-            final_text,
-            backend,
-            model_skipped=True,
+        return finalize_transcript_correction_details(
+            config,
+            make_transcript_correction_details(
+                raw_text,
+                corrected,
+                final_text,
+                backend,
+                model_skipped=True,
+            ),
         )
     if backend != "llama-cpp":
         print(
@@ -3899,36 +3952,45 @@ def correct_transcript_details(text, config, command_labels=None, skip_model=Fal
             file=sys.stderr,
         )
         final_text = sanitize_transcript_text(corrected)
-        return make_transcript_correction_details(
-            raw_text,
-            corrected,
-            final_text,
-            backend,
-            model_skipped=True,
-            fallback_reason="unknown_backend",
+        return finalize_transcript_correction_details(
+            config,
+            make_transcript_correction_details(
+                raw_text,
+                corrected,
+                final_text,
+                backend,
+                model_skipped=True,
+                fallback_reason="unknown_backend",
+            ),
         )
     max_chars = get_transcript_correction_max_chars(config)
     if len(corrected) > max_chars:
         final_text = sanitize_transcript_text(corrected)
-        return make_transcript_correction_details(
-            raw_text,
-            corrected,
-            final_text,
-            backend,
-            model_skipped=True,
-            fallback_reason="max_chars",
+        return finalize_transcript_correction_details(
+            config,
+            make_transcript_correction_details(
+                raw_text,
+                corrected,
+                final_text,
+                backend,
+                model_skipped=True,
+                fallback_reason="max_chars",
+            ),
         )
 
     failure_key = (backend, get_transcript_correction_llama_cpp_model(config))
     if failure_key in TRANSCRIPT_CORRECTION_FAILURES:
         final_text = sanitize_transcript_text(corrected)
-        return make_transcript_correction_details(
-            raw_text,
-            corrected,
-            final_text,
-            backend,
-            model_skipped=True,
-            fallback_reason="previous_failure",
+        return finalize_transcript_correction_details(
+            config,
+            make_transcript_correction_details(
+                raw_text,
+                corrected,
+                final_text,
+                backend,
+                model_skipped=True,
+                fallback_reason="previous_failure",
+            ),
         )
 
     try:
@@ -3958,36 +4020,45 @@ def correct_transcript_details(text, config, command_labels=None, skip_model=Fal
             file=sys.stderr,
         )
         final_text = sanitize_transcript_text(corrected)
-        return make_transcript_correction_details(
-            raw_text,
-            corrected,
-            final_text,
-            backend,
-            model_output=None,
-            model_accepted=False,
-            model_skipped=True,
-            fallback_reason="model_error",
+        return finalize_transcript_correction_details(
+            config,
+            make_transcript_correction_details(
+                raw_text,
+                corrected,
+                final_text,
+                backend,
+                model_output=None,
+                model_accepted=False,
+                model_skipped=True,
+                fallback_reason="model_error",
+            ),
         )
 
     if corrected_transcript_is_plausible(corrected, model_text):
         final_text = sanitize_transcript_text(correct_common_coding_terms(model_text))
-        return make_transcript_correction_details(
+        return finalize_transcript_correction_details(
+            config,
+            make_transcript_correction_details(
+                raw_text,
+                corrected,
+                final_text,
+                backend,
+                model_output=model_text,
+                model_accepted=True,
+            ),
+        )
+    final_text = sanitize_transcript_text(corrected)
+    return finalize_transcript_correction_details(
+        config,
+        make_transcript_correction_details(
             raw_text,
             corrected,
             final_text,
             backend,
             model_output=model_text,
-            model_accepted=True,
-        )
-    final_text = sanitize_transcript_text(corrected)
-    return make_transcript_correction_details(
-        raw_text,
-        corrected,
-        final_text,
-        backend,
-        model_output=model_text,
-        model_accepted=False,
-        fallback_reason="implausible_model_output",
+            model_accepted=False,
+            fallback_reason="implausible_model_output",
+        ),
     )
 
 
