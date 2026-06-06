@@ -270,6 +270,10 @@ COMMON_CODING_TERM_CORRECTIONS = (
     (re.compile(r"(?i)\blang\s+fuse\b"), "Langfuse"),
     (re.compile(r"(?i)\bland\s+fuse\b"), "Langfuse"),
     (re.compile(r"(?i)\blangfuse\b"), "Langfuse"),
+    (re.compile(r"(?i)\byaws\b"), "EVALS"),
+    (re.compile(r"(?i)\be\s*values\b"), "EVALS"),
+    (re.compile(r"(?i)\be\s+vals\b"), "EVALS"),
+    (re.compile(r"(?i)\bevals\b"), "EVALS"),
     (
         re.compile(r"(?i)\b(?:w)?hen\s+all\s+the\s+chains\s+push(?:ed)?\s+to\s+death\b"),
         "did all the changes get pushed to dev",
@@ -469,19 +473,24 @@ def build_auto_tmux_switch_commands(config):
                 "success_message": f"[auto] terminating tmux session: {session}",
                 "exit_after": True,
                 "allow_prefix": False,
+                "requires_explicit_audio": True,
             }
             for alias in build_terminate_command_text_aliases(normalized):
                 commands.setdefault(alias, command)
     return commands
 
 
+def normalize_auto_command_phrase(text):
+    phrase_words = normalize_voice_command_text(text).split()
+    phrase_words, _offset = strip_voice_attention_words(phrase_words)
+    return " ".join(phrase_words)
+
+
 def match_auto_shell_command(text, commands):
     if not commands:
         return None
 
-    phrase_words = normalize_voice_command_text(text).split()
-    phrase_words, _offset = strip_voice_attention_words(phrase_words)
-    phrase = " ".join(phrase_words)
+    phrase = normalize_auto_command_phrase(text)
     if phrase in commands:
         return commands[phrase]
 
@@ -509,6 +518,14 @@ def match_auto_shell_command(text, commands):
                 if bare_target in commands:
                     return commands[bare_target]
     return None
+
+
+def safe_match_auto_shell_command(text, commands):
+    try:
+        return match_auto_shell_command(text, commands)
+    except Exception as exc:
+        print(f"[auto] command parse failed: {exc}", file=sys.stderr)
+        return None
 
 
 def match_auto_shell_command_prefix(text, commands):
@@ -546,6 +563,48 @@ def match_auto_shell_command_prefix(text, commands):
         return None
     _length, command, remainder = max(matches, key=lambda item: item[0])
     return command, remainder
+
+
+def safe_match_auto_shell_command_prefix(text, commands):
+    try:
+        return match_auto_shell_command_prefix(text, commands)
+    except Exception as exc:
+        print(f"[auto] command-prefix parse failed: {exc}", file=sys.stderr)
+        return None
+
+
+def auto_shell_command_has_explicit_audio(command, correction):
+    if not command or not command.get("requires_explicit_audio"):
+        return True
+    if not correction:
+        return False
+    aliases = set(
+        build_terminate_command_text_aliases(
+            normalize_voice_command_text(command.get("label"))
+        )
+    )
+    if not aliases:
+        return False
+    for key in ("raw_transcript", "pre_llm_transcript"):
+        if normalize_auto_command_phrase(correction.get(key)) in aliases:
+            return True
+    return False
+
+
+def auto_shell_command_allowed(command, correction):
+    try:
+        if auto_shell_command_has_explicit_audio(command, correction):
+            return True
+    except Exception as exc:
+        print(f"[auto] command safety check failed: {exc}", file=sys.stderr)
+        return False
+    label = command.get("label") if command else "unknown"
+    print(
+        "[auto] ignored control command without explicit ASR transcript: "
+        f"{label}",
+        file=sys.stderr,
+    )
+    return False
 
 
 def format_colored_detection_words():
@@ -3543,12 +3602,18 @@ def build_transcript_correction_messages(text, command_labels, config):
             "When the raw text sounds like length view, "
             "lang fuse, or land fuse, write Langfuse. When the raw text sounds "
             "like code x, condex, codec, or kodex, write Codex. When the raw "
+            "text sounds like yaws, evalues, e values, e vals, or evals, write "
+            "EVALS. When the raw "
             "text sounds like hen all the chains push to death, or did all the "
             "change got pushed to dev, write did all the changes get pushed to "
             "dev. Example: raw "
             "transcript: send code x to length view. corrected transcript: "
-            "send Codex to Langfuse. Return only the corrected transcript on "
-            "one line."
+            "send Codex to Langfuse. Never invent routing targets or control "
+            "commands when the raw transcript is empty, unclear, or only "
+            "background noise. Do not add terminate, terminates, session, or "
+            "sessions unless those words are explicitly present in the raw "
+            "transcript. If the raw transcript is empty, return an empty line. "
+            "Return only the corrected transcript on one line."
         )
     )
     labels = sorted({str(label).strip() for label in command_labels or [] if label})
@@ -3837,7 +3902,7 @@ def corrected_transcript_is_plausible(raw_text, corrected_text):
         return False
     raw = str(raw_text or "").strip()
     if not raw:
-        return True
+        return False
     if len(corrected) > max(80, len(raw) * 3):
         return False
     raw_words = set(normalize_transcript_for_filter(raw).split())
@@ -6476,17 +6541,28 @@ def main():
         text = transcribe_sample_block(session_state, samples, chunk_index).strip()
         if not text:
             return False
-        command_prefix = match_auto_shell_command_prefix(text, auto_shell_commands)
+        command_prefix = safe_match_auto_shell_command_prefix(
+            text,
+            auto_shell_commands,
+        )
         if command_prefix is not None:
             shell_command, _queued_text = command_prefix
             reset_auto_trigger_session(auto_trigger_session)
-            run_auto_shell_command(shell_command)
+            if auto_shell_command_allowed(
+                shell_command,
+                session_state.get("last_transcript_correction"),
+            ):
+                run_auto_shell_command(shell_command)
             print_auto_waiting()
             return False
-        shell_command = match_auto_shell_command(text, auto_shell_commands)
+        shell_command = safe_match_auto_shell_command(text, auto_shell_commands)
         if shell_command is not None:
             reset_auto_trigger_session(auto_trigger_session)
-            run_auto_shell_command(shell_command)
+            if auto_shell_command_allowed(
+                shell_command,
+                session_state.get("last_transcript_correction"),
+            ):
+                run_auto_shell_command(shell_command)
             print_auto_waiting()
             return False
         queued_text = extract_text_after_trigger_word(
@@ -6624,7 +6700,10 @@ def main():
             print("[auto] no speech detected.")
             print_auto_waiting()
             return
-        command_prefix = match_auto_shell_command_prefix(text, auto_shell_commands)
+        command_prefix = safe_match_auto_shell_command_prefix(
+            text,
+            auto_shell_commands,
+        )
         if command_prefix is not None:
             shell_command, queued_text = command_prefix
             if auto_trigger_session.get("focus_failed"):
@@ -6633,6 +6712,9 @@ def main():
                     "transcript."
                 )
             reset_auto_trigger_session(auto_trigger_session)
+            if not auto_shell_command_allowed(shell_command, history_correction):
+                print_auto_waiting()
+                return
             if not run_auto_shell_command(shell_command):
                 print_auto_waiting()
                 return
@@ -6672,9 +6754,12 @@ def main():
                 )
             print_auto_waiting()
             return
-        shell_command = match_auto_shell_command(text, auto_shell_commands)
+        shell_command = safe_match_auto_shell_command(text, auto_shell_commands)
         if shell_command is not None:
             reset_auto_trigger_session(auto_trigger_session)
+            if not auto_shell_command_allowed(shell_command, history_correction):
+                print_auto_waiting()
+                return
             if run_auto_shell_command(shell_command):
                 print_auto_waiting()
                 return

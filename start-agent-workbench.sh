@@ -378,6 +378,19 @@ auto_stt_command() {
     "$CONFIG_PATH" "$AUTO_READY_FILE" "$SESSION_NAME" "$AUTO_FOCUS_LOG" "$ROOT/run-auto.sh"
 }
 
+start_auto_stt_pane_log() {
+  local voice_pane="$1"
+  local log_target
+  mkdir -p "$(dirname "$AUTO_LOG")"
+  : >>"$AUTO_LOG"
+  printf -v log_target %q "$AUTO_LOG"
+  if ! tmux pipe-pane -t "$voice_pane" "cat >> $log_target"; then
+    echo "[agents] unable to attach auto STT pane output log: $AUTO_LOG" >&2
+    return 0
+  fi
+  echo "[agents] auto STT pane output log: $AUTO_LOG"
+}
+
 process_is_running() {
   local pid="$1"
   [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1
@@ -458,12 +471,33 @@ start_auto_stt() {
   if [[ "$mode" == "pane" ]]; then
     local voice_pane
     voice_pane="$(get_pane_by_title "$VOICE_NAME")"
+    if [[ -z "$voice_pane" ]]; then
+      echo "[agents] voice pane '$VOICE_NAME' not found; skipping auto STT." >&2
+      return
+    fi
+    local current_pane
+    current_pane="$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)"
+    if [[ -n "$voice_pane" && "$voice_pane" == "$current_pane" ]]; then
+      local delayed_command
+      clear_auto_stt_ready
+      start_auto_stt_pane_log "$voice_pane"
+      printf -v delayed_command 'sleep 0.5; tmux send-keys -t %q C-c; tmux send-keys -t %q %q C-m' \
+        "$voice_pane" "$voice_pane" "$command"
+      if tmux run-shell -b "$delayed_command"; then
+        echo "[agents] auto STT scheduled in current voice pane: $voice_pane"
+      else
+        echo "[agents] unable to schedule auto STT in current voice pane: $voice_pane" >&2
+      fi
+      return
+    fi
     if [[ "$(tmux display-message -p -t "$voice_pane" '#{pane_current_command}' 2>/dev/null || true)" == "python" ]]; then
       echo "[agents] auto STT already running in pane: $voice_pane"
+      start_auto_stt_pane_log "$voice_pane"
       wait_for_auto_stt_ready
       return
     fi
     clear_auto_stt_ready
+    start_auto_stt_pane_log "$voice_pane"
     tmux send-keys -t "$voice_pane" C-c
     tmux send-keys -t "$voice_pane" "$command" C-m
     echo "[agents] auto STT running in pane: $voice_pane"
@@ -620,10 +654,11 @@ case "$ATTACH" in
 esac
 
 if [[ "$AGENT_LAYOUT" == "panes" ]]; then
+  agent1_pane="$(get_pane_by_title "$AGENT1_NAME")"
   voice_pane="$(get_pane_by_title "$VOICE_NAME")"
   tmux select-window -t "$SESSION_NAME:$PANES_WINDOW"
-  if [[ -n "$voice_pane" ]]; then
-    tmux select-pane -t "$voice_pane"
+  if [[ -n "$agent1_pane" ]]; then
+    tmux select-pane -t "$agent1_pane"
   else
     tmux select-pane -t "$SESSION_NAME:$PANES_WINDOW.0"
   fi
@@ -634,4 +669,8 @@ else
     tmux select-window -t "$SESSION_NAME:$AGENT1_NAME"
   fi
 fi
-tmux attach-session -t "$SESSION_NAME"
+if [[ -n "${TMUX:-}" ]]; then
+  tmux switch-client -t "$SESSION_NAME"
+else
+  tmux attach-session -t "$SESSION_NAME"
+fi

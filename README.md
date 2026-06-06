@@ -67,8 +67,9 @@ Important fields:
 The built-in fast cleanup always fixes common coding-agent ASR mistakes such as
 `condex`/`code x` to `Codex`, `tea mux` to `tmux`, and `git hub` to `GitHub`.
 It also treats `length view`, `lang fuse`, and similar phonetic variants as
-`Langfuse`. It adds command aliases like `agent to`, `agent too`, and `agent 2`
-for a configured `agent two` pane.
+`Langfuse`, and `yaws`, `evalues`, `e values`, and `e vals` as `EVALS`. It
+adds command aliases like `agent to`, `agent too`, and `agent 2` for a
+configured `agent two` pane.
 
 For model-based cleanup with llama.cpp, add values like these to your local
 `config.json`. These are examples; keep your real local paths and runtime
@@ -120,7 +121,9 @@ in your local `config.json`:
 Terminate commands require an exact phrase match and are not used for
 agent-prefixed message routing. `terminate session`, `terminates session`,
 `terminate sessions`, and `terminates sessions` variants are expanded from one
-configured terminate phrase.
+configured terminate phrase. They also require the raw ASR transcript to contain
+the exact phrase; transcript correction cannot invent a terminate command from
+empty or unclear audio.
 
 ### Voice-Friendly Names
 
@@ -218,6 +221,9 @@ configured in `auto_tmux_terminate_words`.
   `${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-focus.log` by default.
   Override with `VOICE_AUTO_FOCUS_LOG=/path/to/focus.log` or disable with
   `VOICE_AUTO_FOCUS_LOG=0`.
+- Auto listener console output is appended to
+  `${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-auto.log` when the workbench
+  starts the listener. Override with `AUTO_LOG=/path/to/auto.log`.
 - On Wayland, `ydotoold` may need to be running:
 
 ```bash

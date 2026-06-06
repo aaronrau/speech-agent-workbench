@@ -7,6 +7,7 @@ from unittest import mock
 from app import (
     append_transcript_history,
     arm_auto_trigger_session,
+    auto_shell_command_has_explicit_audio,
     build_command_text_aliases,
     build_transcript_correction_messages,
     build_auto_tmux_switch_commands,
@@ -277,6 +278,18 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertIn("pipe", messages[0]["content"].lower())
         self.assertIn("write Pike", messages[0]["content"])
 
+    def test_transcript_correction_prompt_mentions_evals_mishears(self):
+        messages = build_transcript_correction_messages(
+            "run the evalues",
+            [],
+            {},
+        )
+
+        prompt = messages[0]["content"].lower()
+        self.assertIn("yaws", prompt)
+        self.assertIn("evalues", prompt)
+        self.assertIn("write evals", prompt)
+
     def test_correct_common_coding_terms_fixes_codex_and_tmux(self):
         self.assertEqual(
             correct_common_coding_terms("ask condex to inspect tea mux"),
@@ -287,6 +300,16 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(
             correct_common_coding_terms("open the length view trace"),
             "open the Langfuse trace",
+        )
+
+    def test_correct_common_coding_terms_fixes_evals_mishears(self):
+        self.assertEqual(
+            correct_common_coding_terms("run the yaws"),
+            "run the EVALS",
+        )
+        self.assertEqual(
+            correct_common_coding_terms("run evalues and e vals"),
+            "run EVALS and EVALS",
         )
 
     def test_correct_common_coding_terms_fixes_dev_push_phrase(self):
@@ -425,6 +448,33 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         )
         self.assertTrue(details["model_accepted"])
 
+    def test_correct_transcript_details_rejects_model_output_when_raw_empty(self):
+        config = {
+            "transcript_correction_backend": "llama.cpp",
+            "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
+            "transcript_correction_max_new_tokens": 32,
+            "transcript_correction_console_log": False,
+        }
+
+        app.TRANSCRIPT_CORRECTION_FAILURES.clear()
+        with mock.patch.object(
+            app,
+            "correct_transcript_with_llama_cpp_server",
+            return_value="wolf terminate session",
+        ):
+            details = correct_transcript_details(
+                "",
+                config,
+                command_labels=["flux", "forge", "pike", "wolf"],
+            )
+
+        self.assertEqual(details["raw_transcript"], "")
+        self.assertEqual(details["pre_llm_transcript"], "")
+        self.assertEqual(details["corrected_transcript"], "")
+        self.assertEqual(details["model_output"], "wolf terminate session")
+        self.assertFalse(details["model_accepted"])
+        self.assertEqual(details["fallback_reason"], "implausible_model_output")
+
     def test_correct_transcript_details_logs_llama_cpp_translation(self):
         config = {
             "transcript_correction_backend": "llama.cpp",
@@ -493,6 +543,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertNotIn("tmux_send_target", command)
         self.assertTrue(command["exit_after"])
         self.assertFalse(command["allow_prefix"])
+        self.assertTrue(command["requires_explicit_audio"])
         for label in (
             "voice terminates session",
             "voice terminate sessions",
@@ -500,6 +551,44 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         ):
             self.assertEqual(commands[label]["argv"], command["argv"])
             self.assertTrue(commands[label]["exit_after"])
+
+    def test_terminate_command_requires_explicit_raw_audio(self):
+        command = {
+            "label": "wolf terminate session",
+            "argv": ["tmux", "kill-session"],
+            "requires_explicit_audio": True,
+        }
+
+        self.assertFalse(
+            auto_shell_command_has_explicit_audio(
+                command,
+                {
+                    "raw_transcript": "",
+                    "pre_llm_transcript": "",
+                    "corrected_transcript": "wolf terminate session",
+                },
+            )
+        )
+        self.assertFalse(
+            auto_shell_command_has_explicit_audio(
+                command,
+                {
+                    "raw_transcript": "Hey Wall.",
+                    "pre_llm_transcript": "Hey Wall.",
+                    "corrected_transcript": "wolf terminate session",
+                },
+            )
+        )
+        self.assertTrue(
+            auto_shell_command_has_explicit_audio(
+                command,
+                {
+                    "raw_transcript": "Hey Wolf terminate session.",
+                    "pre_llm_transcript": "Hey Wolf terminate session.",
+                    "corrected_transcript": "wolf terminate session",
+                },
+            )
+        )
 
     def test_auto_tmux_switch_commands_disable_terminate_commands_by_default(self):
         with mock.patch.dict(
