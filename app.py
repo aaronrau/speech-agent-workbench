@@ -525,6 +525,10 @@ def match_auto_shell_command_prefix(text, commands):
 
     spoken_tokens = [token.group(0).lower() for token in tokens]
     spoken_tokens, start_index = strip_voice_attention_words(spoken_tokens)
+    phrase = " ".join(spoken_tokens)
+    if phrase in commands and commands[phrase].get("allow_prefix") is False:
+        return None
+
     matches = []
     for command_text, command in commands.items():
         if command.get("allow_prefix") is False:

@@ -583,6 +583,27 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             commands["voice confirm terminate session"],
         )
 
+    def test_exact_only_command_beats_shorter_prefix_command(self):
+        commands = {
+            "wolf": {
+                "label": "wolf",
+                "argv": ["tmux", "select-pane"],
+            },
+            "wolf terminate session": {
+                "label": "wolf terminate session",
+                "argv": ["tmux", "kill-session"],
+                "allow_prefix": False,
+            },
+        }
+
+        self.assertIsNone(
+            match_auto_shell_command_prefix("Wolf terminate session", commands)
+        )
+        self.assertEqual(
+            match_auto_shell_command("Wolf terminate session", commands),
+            commands["wolf terminate session"],
+        )
+
     def test_match_auto_shell_command_prefix_accepts_target_and_message(self):
         commands = {"agent two": {"label": "agent two", "argv": ["tmux"]}}
 
