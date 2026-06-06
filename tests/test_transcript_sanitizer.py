@@ -257,7 +257,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
 
     def test_build_command_text_aliases_includes_agent_homophones(self):
         self.assertIn("flex", build_command_text_aliases("flux"))
-        self.assertIn("nios", build_command_text_aliases("niles"))
+        self.assertIn("pipe", build_command_text_aliases("pike"))
         commands = {"flex": {"label": "flux", "argv": ["tmux"]}}
         self.assertEqual(
             match_auto_shell_command_prefix(
@@ -267,15 +267,15 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             (commands["flex"], "what are the daily active users"),
         )
 
-    def test_transcript_correction_prompt_mentions_nios_for_niles(self):
+    def test_transcript_correction_prompt_mentions_pipe_for_pike(self):
         messages = build_transcript_correction_messages(
-            "Nios check the latest branch",
-            ["niles"],
+            "Pipe check the latest branch",
+            ["pike"],
             {},
         )
 
-        self.assertIn("nios", messages[0]["content"].lower())
-        self.assertIn("write Niles", messages[0]["content"])
+        self.assertIn("pipe", messages[0]["content"].lower())
+        self.assertIn("write Pike", messages[0]["content"])
 
     def test_correct_common_coding_terms_fixes_codex_and_tmux(self):
         self.assertEqual(
@@ -378,7 +378,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 result = correct_transcript_text(
                     "Hey Flex what are the daily active users for today",
                     config,
-                    command_labels=["flux", "forge", "niles", "wolf"],
+                    command_labels=["flux", "forge", "pike", "wolf"],
                 )
 
         self.assertEqual(

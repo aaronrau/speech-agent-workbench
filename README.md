@@ -132,7 +132,6 @@ Good examples:
 
 - `Flux`
 - `Forge`
-- `Niles`
 - `Knox`
 - `Pike`
 - `Slate`
@@ -191,7 +190,7 @@ look like this:
 | > Review phone verification  | > Add backend validation     |
 |                              |                              |
 +------------------------------+------------------------------+
-| Niles                        | Wolf                         |
+| Pike                         | Wolf                         |
 | $ codex                      | $ ./run-auto.sh              |
 | > Update Flutter states      | [auto] parakeet-onnx ready   |
 |                              | routes: "forge add tests"    |
