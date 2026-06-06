@@ -299,7 +299,7 @@ COMMAND_TOKEN_ALIASES = {
     "codex": ("code x", "condex", "codec", "kodex"),
     "flux": ("flex", "flax"),
     "forge": ("forage",),
-    "niles": ("miles", "nials", "nyles"),
+    "niles": ("miles", "nials", "nyles", "nios"),
     "wolf": ("wulf", "wolfe"),
 }
 
@@ -3534,7 +3534,8 @@ def build_transcript_correction_messages(text, command_labels, config):
             "text sounds like them. If the first one to three raw words sound "
             "like an available spoken routing target, replace them with that "
             "exact target name. For example, if the available target is flux "
-            "and the raw text starts with flex, write Flux. "
+            "and the raw text starts with flex, write Flux. If the available "
+            "target is niles and the raw text starts with nios, write Niles. "
             "When the raw text sounds like length view, "
             "lang fuse, or land fuse, write Langfuse. When the raw text sounds "
             "like code x, condex, codec, or kodex, write Codex. When the raw "
