@@ -2,7 +2,7 @@
   "auto_max_utterance_seconds": 90.0,
   "auto_pause_hotkey": "ctrl",
   "auto_poll_seconds": 0.05,
-  "auto_pre_roll_seconds": 1.5,
+  "auto_pre_roll_seconds": 1.0,
   "auto_sherpa_vad_min_silence_seconds": 0.2,
   "auto_sherpa_vad_min_speech_seconds": 0.05,
   "auto_sherpa_vad_model": "models/silero_vad.onnx",
