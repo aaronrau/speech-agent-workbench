@@ -74,6 +74,9 @@ configured `agent two` pane.
 For model-based cleanup with llama.cpp, add values like these to your local
 `config.json`. These are examples; keep your real local paths and runtime
 settings in `config.json`, which is git-ignored.
+The default correction prompt is also configured in `config.example.json` under
+`transcript_correction_prompt`; copy or edit that value in your local
+`config.json` when changing correction behavior.
 
 ```json
 {

@@ -33,6 +33,16 @@ from app import (
 import app
 
 
+def load_example_transcript_correction_prompt():
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(
+        os.path.join(repo_root, "config.example.json"),
+        "r",
+        encoding="utf-8",
+    ) as handle:
+        return json.load(handle)["transcript_correction_prompt"]
+
+
 class SanitizeTranscriptTextTests(unittest.TestCase):
     def test_keeps_alphanumeric_period_plus_and_spaces(self):
         self.assertEqual(
@@ -272,7 +282,11 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         messages = build_transcript_correction_messages(
             "Pipe check the latest branch",
             ["pike"],
-            {},
+            {
+                "transcript_correction_prompt": (
+                    load_example_transcript_correction_prompt()
+                )
+            },
         )
 
         self.assertIn("pipe", messages[0]["content"].lower())
@@ -282,7 +296,11 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         messages = build_transcript_correction_messages(
             "run the evalues",
             [],
-            {},
+            {
+                "transcript_correction_prompt": (
+                    load_example_transcript_correction_prompt()
+                )
+            },
         )
 
         prompt = messages[0]["content"].lower()
