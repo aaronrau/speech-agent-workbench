@@ -6280,6 +6280,13 @@ def run_auto_shell_command(command):
     return True
 
 
+def make_tmux_send_buffer_name():
+    return (
+        f"voice-workbench-{os.getpid()}-"
+        f"{threading.get_ident()}-{time.monotonic_ns()}"
+    )
+
+
 def send_text_to_tmux_target(command, text):
     target = str(command.get("tmux_send_target") or "").strip()
     label = command.get("label") or target or "tmux target"
@@ -6303,7 +6310,7 @@ def send_text_to_tmux_target(command, text):
         print(f"[auto] tmux not found; cannot send queued text to {label}.", file=sys.stderr)
         return False
 
-    buffer_name = f"voice-workbench-{os.getpid()}"
+    buffer_name = make_tmux_send_buffer_name()
     append_auto_focus_log(
         "tmux-send-start",
         label=label,

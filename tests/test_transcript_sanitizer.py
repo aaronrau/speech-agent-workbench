@@ -1128,7 +1128,8 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                         )
                     )
 
-        buffer_name = f"voice-workbench-{os.getpid()}"
+        buffer_name = calls[0][3]
+        self.assertTrue(buffer_name.startswith(f"voice-workbench-{os.getpid()}-"))
         self.assertEqual(
             calls,
             [
