@@ -4800,6 +4800,45 @@ def print_tmux_summary(agent_label, command_text, summary):
     print(f"[tmux-summary][{label}] Summary: {summary}", flush=True)
 
 
+SENSITIVE_URL_QUERY_KEYS = {
+    "access_token",
+    "api_key",
+    "auth",
+    "authorization",
+    "key",
+    "secret",
+    "signature",
+    "sig",
+    "token",
+}
+
+
+def redact_url_for_log(url):
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError:
+        return text
+    netloc = parts.netloc
+    if "@" in netloc:
+        netloc = f"***@{netloc.rsplit('@', 1)[1]}"
+    query = parts.query
+    if query:
+        query_items = urllib.parse.parse_qsl(query, keep_blank_values=True)
+        redacted_items = []
+        for key, value in query_items:
+            if key.lower() in SENSITIVE_URL_QUERY_KEYS:
+                redacted_items.append((key, "***"))
+            else:
+                redacted_items.append((key, value))
+        query = urllib.parse.urlencode(redacted_items, safe="*")
+    return urllib.parse.urlunsplit(
+        (parts.scheme, netloc, parts.path, query, parts.fragment)
+    )
+
+
 def get_tmux_summary_webhook_url(config):
     return get_config_string(
         config,
@@ -4807,6 +4846,55 @@ def get_tmux_summary_webhook_url(config):
         "tmux_summary_webhook_url",
         DEFAULT_CONFIG["tmux_summary_webhook_url"],
     )
+
+
+def get_tmux_summary_webhook_token(config):
+    return get_config_string(
+        config,
+        "VOICE_TMUX_SUMMARY_WEBHOOK_TOKEN",
+        "tmux_summary_webhook_token",
+        DEFAULT_CONFIG["tmux_summary_webhook_token"],
+    )
+
+
+def get_tmux_summary_webhook_timeout(config):
+    return get_config_float(
+        config,
+        "VOICE_TMUX_SUMMARY_WEBHOOK_TIMEOUT",
+        "tmux_summary_webhook_timeout",
+        DEFAULT_CONFIG["tmux_summary_webhook_timeout"],
+        minimum=0.1,
+    )
+
+
+def log_tmux_summary_webhook_configuration(config):
+    url = get_tmux_summary_webhook_url(config)
+    summary_enabled = get_config_bool(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_ENABLED",
+        "auto_tmux_summary_enabled",
+        DEFAULT_CONFIG["auto_tmux_summary_enabled"],
+    )
+    if not url:
+        print(
+            "[tmux-summary] webhook disabled; set "
+            "VOICE_TMUX_SUMMARY_WEBHOOK_URL to POST summaries",
+            flush=True,
+        )
+        return
+    token = get_tmux_summary_webhook_token(config)
+    timeout = get_tmux_summary_webhook_timeout(config)
+    auth_status = "bearer token configured" if token else "not configured"
+    print(f"[tmux-summary] webhook POST {redact_url_for_log(url)}", flush=True)
+    print(
+        f"[tmux-summary] webhook auth: {auth_status}; timeout: {timeout:g}s",
+        flush=True,
+    )
+    if not summary_enabled:
+        print(
+            "[tmux-summary] webhook inactive because tmux summaries are disabled",
+            flush=True,
+        )
 
 
 def post_tmux_summary_webhook(config, agent_label, command_text, summary):
@@ -4820,21 +4908,10 @@ def post_tmux_summary_webhook(config, agent_label, command_text, summary):
         "timestamp": time.time(),
     }
     headers = {"Content-Type": "application/json"}
-    token = get_config_string(
-        config,
-        "VOICE_TMUX_SUMMARY_WEBHOOK_TOKEN",
-        "tmux_summary_webhook_token",
-        DEFAULT_CONFIG["tmux_summary_webhook_token"],
-    )
+    token = get_tmux_summary_webhook_token(config)
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    timeout = get_config_float(
-        config,
-        "VOICE_TMUX_SUMMARY_WEBHOOK_TIMEOUT",
-        "tmux_summary_webhook_timeout",
-        DEFAULT_CONFIG["tmux_summary_webhook_timeout"],
-        minimum=0.1,
-    )
+    timeout = get_tmux_summary_webhook_timeout(config)
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -4925,6 +5002,11 @@ def route_api_message_to_tmux(agent, message, commands):
     key = normalize_voice_command_text(agent)
     command = index.get(key)
     if command is None:
+        print(
+            f"[api] rejected message for unknown agent '{str(agent or '').strip()}'; "
+            f"available: {', '.join(available) if available else 'none'}",
+            flush=True,
+        )
         return {
             "ok": False,
             "error": "unknown_agent",
@@ -4933,6 +5015,10 @@ def route_api_message_to_tmux(agent, message, commands):
         }
     body = str(message or "").strip()
     if not body:
+        print(
+            f"[api] rejected empty message for {command.get('label') or agent}",
+            flush=True,
+        )
         return {
             "ok": False,
             "error": "empty_message",
@@ -4940,6 +5026,12 @@ def route_api_message_to_tmux(agent, message, commands):
             "available_agents": available,
         }
     sent = send_text_to_tmux_target(command, body)
+    status = "routed" if sent else "failed to route"
+    print(
+        f"[api] {status} message to {command.get('label') or agent} "
+        f"({len(body)} chars)",
+        flush=True,
+    )
     return {
         "ok": bool(sent),
         "agent": command.get("label") or agent,
@@ -4958,13 +5050,82 @@ def voice_api_authorized(headers, token):
     return headers.get("X-Voice-Api-Token", "") == token
 
 
-def make_voice_api_handler(config, commands):
-    token = get_config_string(
+def get_voice_api_bind(config):
+    host = get_config_string(
+        config,
+        "VOICE_API_HOST",
+        "api_host",
+        DEFAULT_CONFIG["api_host"],
+    ) or "127.0.0.1"
+    port = get_config_int(
+        config,
+        "VOICE_API_PORT",
+        "api_port",
+        DEFAULT_CONFIG["api_port"],
+        minimum=1,
+    )
+    return host, port
+
+
+def get_voice_api_token(config):
+    return get_config_string(
         config,
         "VOICE_API_TOKEN",
         "api_token",
         DEFAULT_CONFIG["api_token"],
     )
+
+
+def format_voice_api_url_host(host):
+    host = str(host or "127.0.0.1").strip() or "127.0.0.1"
+    if host == "0.0.0.0":
+        return "127.0.0.1"
+    if host == "::":
+        return "[::1]"
+    if ":" in host and not (host.startswith("[") and host.endswith("]")):
+        return f"[{host}]"
+    return host
+
+
+def build_voice_api_post_url(host, port):
+    return f"http://{format_voice_api_url_host(host)}:{int(port)}/messages"
+
+
+def log_voice_api_configuration(config, commands, enabled):
+    host, port = get_voice_api_bind(config)
+    post_url = build_voice_api_post_url(host, port)
+    token = get_voice_api_token(config)
+    _index, available = build_api_agent_command_index(commands)
+    if not enabled:
+        print(
+            f"[api] local message API disabled; enable VOICE_API_ENABLED=1 "
+            f"for POST {post_url}",
+            flush=True,
+        )
+        return
+    print(f"[api] POST {post_url}", flush=True)
+    if format_voice_api_url_host(host) != host:
+        print(f"[api] bound to {host}:{port}", flush=True)
+    print(
+        "[api] payload: "
+        '{"message":"flux: pull the latest"} or '
+        '{"agent":"Flux","message":"pull the latest"}',
+        flush=True,
+    )
+    auth_status = (
+        "bearer token required via Authorization or X-Voice-Api-Token"
+        if token
+        else "not configured"
+    )
+    print(f"[api] auth: {auth_status}", flush=True)
+    print(
+        f"[api] agents: {', '.join(available) if available else 'none configured'}",
+        flush=True,
+    )
+
+
+def make_voice_api_handler(config, commands):
+    token = get_voice_api_token(config)
 
     class VoiceApiHandler(http.server.BaseHTTPRequestHandler):
         server_version = "SpeechAgentWorkbenchAPI/1.0"
@@ -5017,20 +5178,9 @@ def start_voice_api_server(config, commands):
         DEFAULT_CONFIG["api_enabled"],
     )
     if not enabled:
+        log_voice_api_configuration(config, commands, enabled=False)
         return None
-    host = get_config_string(
-        config,
-        "VOICE_API_HOST",
-        "api_host",
-        DEFAULT_CONFIG["api_host"],
-    ) or "127.0.0.1"
-    port = get_config_int(
-        config,
-        "VOICE_API_PORT",
-        "api_port",
-        DEFAULT_CONFIG["api_port"],
-        minimum=1,
-    )
+    host, port = get_voice_api_bind(config)
     try:
         server = http.server.ThreadingHTTPServer(
             (host, port),
@@ -5041,7 +5191,7 @@ def start_voice_api_server(config, commands):
         return None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    print(f"[api] listening on http://{host}:{port}")
+    log_voice_api_configuration(config, commands, enabled=True)
     return server
 
 
@@ -6905,6 +7055,7 @@ def main():
     agent_completion_log_tailer = None
     voice_api_server = None
     if run_mode == "auto":
+        log_tmux_summary_webhook_configuration(config)
         tmux_console_log_tailer = start_auto_tmux_console_log_tailer(config)
         agent_completion_log_tailer = start_agent_completion_log_tailer(config)
         voice_api_server = start_voice_api_server(config, auto_shell_commands)
@@ -7366,9 +7517,22 @@ def main():
             auto_control["paused"] = paused
             auto_control["event"].set()
         if paused:
-            print("[auto] paused. Press Ctrl again to resume.")
+            if get_config_bool(
+                config,
+                "VOICE_API_ENABLED",
+                "api_enabled",
+                DEFAULT_CONFIG["api_enabled"],
+            ):
+                host, port = get_voice_api_bind(config)
+                print(
+                    "[auto] paused audio listening. API routing remains active: "
+                    f"POST {build_voice_api_post_url(host, port)}. "
+                    "Press Ctrl again to resume."
+                )
+            else:
+                print("[auto] paused audio listening. Press Ctrl again to resume.")
         else:
-            print("[auto] resumed.")
+            print("[auto] resumed audio listening.")
 
     def toggle_auto_pause():
         with auto_control["lock"]:

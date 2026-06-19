@@ -59,7 +59,7 @@ Important fields:
 - `transcript_correction_backend`: set to `llama-cpp` for model cleanup
 - `transcript_correction_llama_cpp_model`: GGUF model path for llama.cpp cleanup
 - `paste_mode`: `type`, `clipboard`, `hotkey`, or `auto`
-- `agent_workbench.agent_command`: command to start in each agent pane
+- `agent_workbench.agent_command`: command to start in each agent pane; default example is `codex --sandbox danger-full-access --ask-for-approval never`
 - `agent_workbench.agents`: pane names and working directories
 
 ### llama.cpp STT Cleanup
@@ -185,19 +185,19 @@ The launcher does not block on the voice pane by default after startup. Set `AUT
 
 ### Example Run
 
-With `agent_workbench.agent_command` set to `codex`, the launcher creates
+With `agent_workbench.agent_command` set to `codex --sandbox danger-full-access --ask-for-approval never`, the launcher creates
 three Codex panes and one voice orchestrator pane. A tiled tmux workbench might
 look like this:
 
 ```text
 +------------------------------+------------------------------+
 | Flux                         | Brock                        |
-| $ codex                      | $ codex                      |
+| $ codex --sandbox ...        | $ codex --sandbox ...        |
 | > Review phone verification  | > Add backend validation     |
 |                              |                              |
 +------------------------------+------------------------------+
 | Pike                         | Wolf                         |
-| $ codex                      | $ ./run-auto.sh              |
+| $ codex --sandbox ...        | $ ./run-auto.sh              |
 | > Update Flutter states      | [auto] parakeet-onnx ready   |
 |                              | routes: "brock add tests"    |
 +------------------------------+------------------------------+

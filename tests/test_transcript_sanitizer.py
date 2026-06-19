@@ -295,6 +295,19 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(payload["command"], "pull the latest")
         self.assertEqual(payload["summary"], "Flux pulled the latest changes.")
 
+    def test_redact_url_for_log_hides_webhook_secrets(self):
+        url = "https://user:pass@example.test/hook?token=abc&api_key=xyz&mode=dev"
+        self.assertEqual(
+            app.redact_url_for_log(url),
+            "https://***@example.test/hook?token=***&api_key=***&mode=dev",
+        )
+
+    def test_build_voice_api_post_url_uses_loopback_for_wildcard_bind(self):
+        self.assertEqual(
+            app.build_voice_api_post_url("0.0.0.0", 8787),
+            "http://127.0.0.1:8787/messages",
+        )
+
     def test_trim_auto_tmux_console_log_caps_size(self):
         now = int(time.time())
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:

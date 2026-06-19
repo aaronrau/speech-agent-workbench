@@ -98,7 +98,7 @@
   "whisper_model": "base",
   "whisper_task": "transcribe",
   "agent_workbench": {
-    "agent_command": "codex",
+    "agent_command": "codex --sandbox danger-full-access --ask-for-approval never",
     "agents": [
       {
         "name": "Agent 1",

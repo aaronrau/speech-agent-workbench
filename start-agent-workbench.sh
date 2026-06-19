@@ -41,7 +41,7 @@ Examples:
 
 Optional environment variables:
   SESSION_NAME=speech-agent-workbench
-  AGENT_COMMAND=codex
+  AGENT_COMMAND='codex --sandbox danger-full-access --ask-for-approval never'
   AGENT_LAYOUT=panes
   AUTO_STT=1
   AUTO_STT_MODE=auto
@@ -73,7 +73,7 @@ defaults = {
     "session_name": "speech-agent-workbench",
     "layout": "panes",
     "panes_window": "Workbench",
-    "agent_command": "codex",
+    "agent_command": "codex --sandbox danger-full-access --ask-for-approval never",
     "agents": [
         {"name": "Agent 1", "path": home},
         {"name": "Agent 2", "path": home},
