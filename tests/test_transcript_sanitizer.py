@@ -195,6 +195,106 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             "[agent-complete][Brock] done: tests passed",
         )
 
+    def test_parse_api_message_payload_accepts_agent_prefix(self):
+        agent, message, error = app.parse_api_message_payload(
+            b'{"message":"flux: pull the latest"}',
+            "application/json",
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(agent, "flux")
+        self.assertEqual(message, "pull the latest")
+
+    def test_parse_api_message_payload_accepts_plain_text_without_content_type(self):
+        agent, message, error = app.parse_api_message_payload(
+            b"flux: pull the latest",
+            "",
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(agent, "flux")
+        self.assertEqual(message, "pull the latest")
+
+    def test_route_api_message_to_tmux_sends_known_agent(self):
+        commands = {
+            "flux": {
+                "label": "flux",
+                "tmux_send_target": "%1",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+            }
+        }
+
+        with mock.patch.object(app, "send_text_to_tmux_target", return_value=True) as sent:
+            result = app.route_api_message_to_tmux(
+                "Flux",
+                "pull the latest",
+                commands,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["agent"], "flux")
+        self.assertEqual(result["message"], "pull the latest")
+        sent.assert_called_once_with(commands["flux"], "pull the latest")
+
+    def test_route_api_message_to_tmux_reports_unknown_agent(self):
+        commands = {
+            "flux": {
+                "label": "flux",
+                "tmux_send_target": "%1",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+            }
+        }
+
+        result = app.route_api_message_to_tmux(
+            "Unknown",
+            "pull the latest",
+            commands,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "unknown_agent")
+        self.assertEqual(result["available_agents"], ["flux"])
+
+    def test_post_tmux_summary_webhook_sends_json_payload(self):
+        config = {
+            "tmux_summary_webhook_url": "http://127.0.0.1:9999/hook",
+            "tmux_summary_webhook_token": "secret",
+            "tmux_summary_webhook_timeout": 1.0,
+        }
+        requests = []
+
+        class Response:
+            status = 204
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+        def fake_urlopen(request, timeout):
+            requests.append((request, timeout))
+            return Response()
+
+        with mock.patch.object(app.urllib.request, "urlopen", side_effect=fake_urlopen):
+            self.assertTrue(
+                app.post_tmux_summary_webhook(
+                    config,
+                    "Flux",
+                    "pull the latest",
+                    "Flux pulled the latest changes.",
+                )
+            )
+
+        request, timeout = requests[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(timeout, 1.0)
+        self.assertEqual(request.full_url, "http://127.0.0.1:9999/hook")
+        self.assertEqual(request.headers["Authorization"], "Bearer secret")
+        self.assertEqual(payload["agent"], "Flux")
+        self.assertEqual(payload["command"], "pull the latest")
+        self.assertEqual(payload["summary"], "Flux pulled the latest changes.")
+
     def test_trim_auto_tmux_console_log_caps_size(self):
         now = int(time.time())
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:

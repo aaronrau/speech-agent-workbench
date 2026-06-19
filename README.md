@@ -207,6 +207,47 @@ Say `brock add tests for phone verification` to send that prompt to the
 `Brock` pane. If you opt into terminate commands, use the exact phrase you
 configured in `auto_tmux_terminate_words`.
 
+### Local Message API
+
+Enable the local API to route text into known tmux agent targets without using
+the microphone:
+
+```bash
+VOICE_API_ENABLED=1 VOICE_API_TOKEN=local-secret ./run-auto.sh
+```
+
+Send an agent-prefixed message with JSON:
+
+```bash
+curl -sS http://127.0.0.1:8787/messages \
+  -H 'Authorization: Bearer local-secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"flux: pull the latest"}'
+```
+
+You can also pass the agent separately:
+
+```json
+{"agent":"Flux","message":"pull the latest"}
+```
+
+Only configured agent targets are accepted. Unknown names return a JSON error
+with the available agents.
+
+Set `VOICE_TMUX_SUMMARY_WEBHOOK_URL` to receive each tmux summary as JSON:
+
+```json
+{
+  "agent": "Flux",
+  "command": "pull the latest",
+  "summary": "Flux pulled the latest changes successfully.",
+  "timestamp": 1781852824.8
+}
+```
+
+Use `VOICE_TMUX_SUMMARY_WEBHOOK_TOKEN` to send an `Authorization: Bearer ...`
+header and `VOICE_TMUX_SUMMARY_WEBHOOK_TIMEOUT` to tune the POST timeout.
+
 ## Notes
 
 - X11 typing uses `xdotool`/`xclip`.

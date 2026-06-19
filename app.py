@@ -2,6 +2,7 @@ import ast
 import bisect
 import gc
 import hashlib
+import http.server
 import json
 import math
 import os
@@ -111,6 +112,13 @@ DEFAULT_CONFIG = {
     "agent_completion_log_retention_seconds": 3600,
     "agent_completion_log_max_bytes": 262144,
     "agent_completion_log_poll_seconds": 0.2,
+    "api_enabled": False,
+    "api_host": "127.0.0.1",
+    "api_port": 8787,
+    "api_token": None,
+    "tmux_summary_webhook_url": None,
+    "tmux_summary_webhook_token": None,
+    "tmux_summary_webhook_timeout": 5.0,
     "transcript_correction_backend": "off",
     "transcript_correction_max_new_tokens": 256,
     "transcript_correction_max_chars": 700,
@@ -4792,6 +4800,251 @@ def print_tmux_summary(agent_label, command_text, summary):
     print(f"[tmux-summary][{label}] Summary: {summary}", flush=True)
 
 
+def get_tmux_summary_webhook_url(config):
+    return get_config_string(
+        config,
+        "VOICE_TMUX_SUMMARY_WEBHOOK_URL",
+        "tmux_summary_webhook_url",
+        DEFAULT_CONFIG["tmux_summary_webhook_url"],
+    )
+
+
+def post_tmux_summary_webhook(config, agent_label, command_text, summary):
+    url = get_tmux_summary_webhook_url(config)
+    if not url:
+        return False
+    payload = {
+        "agent": str(agent_label or ""),
+        "command": str(command_text or ""),
+        "summary": str(summary or ""),
+        "timestamp": time.time(),
+    }
+    headers = {"Content-Type": "application/json"}
+    token = get_config_string(
+        config,
+        "VOICE_TMUX_SUMMARY_WEBHOOK_TOKEN",
+        "tmux_summary_webhook_token",
+        DEFAULT_CONFIG["tmux_summary_webhook_token"],
+    )
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    timeout = get_config_float(
+        config,
+        "VOICE_TMUX_SUMMARY_WEBHOOK_TIMEOUT",
+        "tmux_summary_webhook_timeout",
+        DEFAULT_CONFIG["tmux_summary_webhook_timeout"],
+        minimum=0.1,
+    )
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return 200 <= int(getattr(response, "status", 200)) < 300
+    except Exception as exc:
+        print(f"[tmux-summary] webhook failed: {exc}", file=sys.stderr)
+        return False
+
+
+def dispatch_tmux_summary_webhook(config, agent_label, command_text, summary):
+    if not get_tmux_summary_webhook_url(config):
+        return None
+    thread = threading.Thread(
+        target=post_tmux_summary_webhook,
+        args=(config, agent_label, command_text, summary),
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def parse_agent_prefixed_message(text):
+    message = str(text or "").strip()
+    match = re.match(r"^([^:\n]{1,80}):\s*(.+)$", message, flags=re.S)
+    if not match:
+        return None, message
+    agent = match.group(1).strip()
+    body = match.group(2).strip()
+    if not agent or not body:
+        return None, message
+    return agent, body
+
+
+def parse_api_message_payload(body, content_type="application/json"):
+    content_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body or "")
+    if content_type == "application/json" or text.lstrip().startswith("{"):
+        try:
+            payload = json.loads(text or "{}")
+        except json.JSONDecodeError as exc:
+            return None, None, f"invalid_json: {exc}"
+        if not isinstance(payload, dict):
+            return None, None, "invalid_payload"
+        agent = str(payload.get("agent") or "").strip()
+        message = str(payload.get("message") or payload.get("text") or "").strip()
+        if agent and message:
+            return agent, message, None
+        if message:
+            agent, body_text = parse_agent_prefixed_message(message)
+            if agent and body_text:
+                return agent, body_text, None
+        return None, None, "missing_message"
+
+    agent, body_text = parse_agent_prefixed_message(text)
+    if not agent or not body_text:
+        return None, None, "missing_agent_prefix"
+    return agent, body_text, None
+
+
+def build_api_agent_command_index(commands):
+    index = {}
+    labels = {}
+    for alias, command in (commands or {}).items():
+        if not command.get("tmux_send_target"):
+            continue
+        label = str(command.get("label") or alias or "").strip()
+        if label:
+            labels.setdefault(normalize_voice_command_text(label), label)
+        candidates = {str(alias or ""), label}
+        normalized_label = normalize_voice_command_text(label)
+        if normalized_label:
+            candidates.update(build_command_text_aliases(normalized_label))
+        for candidate in candidates:
+            key = normalize_voice_command_text(candidate)
+            if key:
+                index.setdefault(key, command)
+    available = sorted(labels.values(), key=lambda value: value.lower())
+    return index, available
+
+
+def route_api_message_to_tmux(agent, message, commands):
+    index, available = build_api_agent_command_index(commands)
+    key = normalize_voice_command_text(agent)
+    command = index.get(key)
+    if command is None:
+        return {
+            "ok": False,
+            "error": "unknown_agent",
+            "agent": str(agent or ""),
+            "available_agents": available,
+        }
+    body = str(message or "").strip()
+    if not body:
+        return {
+            "ok": False,
+            "error": "empty_message",
+            "agent": command.get("label") or agent,
+            "available_agents": available,
+        }
+    sent = send_text_to_tmux_target(command, body)
+    return {
+        "ok": bool(sent),
+        "agent": command.get("label") or agent,
+        "message": body,
+        "sent": bool(sent),
+    }
+
+
+def voice_api_authorized(headers, token):
+    token = str(token or "").strip()
+    if not token:
+        return True
+    auth_header = headers.get("Authorization", "")
+    if auth_header == f"Bearer {token}":
+        return True
+    return headers.get("X-Voice-Api-Token", "") == token
+
+
+def make_voice_api_handler(config, commands):
+    token = get_config_string(
+        config,
+        "VOICE_API_TOKEN",
+        "api_token",
+        DEFAULT_CONFIG["api_token"],
+    )
+
+    class VoiceApiHandler(http.server.BaseHTTPRequestHandler):
+        server_version = "SpeechAgentWorkbenchAPI/1.0"
+
+        def log_message(self, _format, *_args):
+            return
+
+        def send_json(self, status_code, payload):
+            data = json.dumps(payload, sort_keys=True).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_POST(self):
+            path = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
+            if path != "/messages":
+                self.send_json(404, {"ok": False, "error": "not_found"})
+                return
+            if not voice_api_authorized(self.headers, token):
+                self.send_json(401, {"ok": False, "error": "unauthorized"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except ValueError:
+                length = 0
+            if length <= 0 or length > 65536:
+                self.send_json(400, {"ok": False, "error": "invalid_body_size"})
+                return
+            body = self.rfile.read(length)
+            agent, message, error = parse_api_message_payload(
+                body,
+                self.headers.get("Content-Type", ""),
+            )
+            if error:
+                self.send_json(400, {"ok": False, "error": error})
+                return
+            result = route_api_message_to_tmux(agent, message, commands)
+            self.send_json(200 if result.get("ok") else 400, result)
+
+    return VoiceApiHandler
+
+
+def start_voice_api_server(config, commands):
+    enabled = get_config_bool(
+        config,
+        "VOICE_API_ENABLED",
+        "api_enabled",
+        DEFAULT_CONFIG["api_enabled"],
+    )
+    if not enabled:
+        return None
+    host = get_config_string(
+        config,
+        "VOICE_API_HOST",
+        "api_host",
+        DEFAULT_CONFIG["api_host"],
+    ) or "127.0.0.1"
+    port = get_config_int(
+        config,
+        "VOICE_API_PORT",
+        "api_port",
+        DEFAULT_CONFIG["api_port"],
+        minimum=1,
+    )
+    try:
+        server = http.server.ThreadingHTTPServer(
+            (host, port),
+            make_voice_api_handler(config, commands),
+        )
+    except OSError as exc:
+        print(f"[api] unable to start local API on {host}:{port}: {exc}", file=sys.stderr)
+        return None
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"[api] listening on http://{host}:{port}")
+    return server
+
+
 def get_agent_completion_log_path(config):
     value = os.environ.get("VOICE_AGENT_COMPLETION_LOG")
     if value is None:
@@ -5142,6 +5395,12 @@ def start_auto_tmux_console_log_tailer(config):
                             )
                             continue
                         print_tmux_summary(agent_label, command_text, summary)
+                        dispatch_tmux_summary_webhook(
+                            config,
+                            agent_label,
+                            command_text,
+                            summary,
+                        )
                 elif tmux_console_buffer_should_flush(
                     pending_output,
                     last_output_at,
@@ -6644,9 +6903,11 @@ def main():
     signal_voice_ready(run_mode, transcribe_backend, _transcribe_model_label)
     tmux_console_log_tailer = None
     agent_completion_log_tailer = None
+    voice_api_server = None
     if run_mode == "auto":
         tmux_console_log_tailer = start_auto_tmux_console_log_tailer(config)
         agent_completion_log_tailer = start_agent_completion_log_tailer(config)
+        voice_api_server = start_voice_api_server(config, auto_shell_commands)
 
     def render_meter(level, width=24):
         filled = int(level * width)
