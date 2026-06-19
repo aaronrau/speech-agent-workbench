@@ -137,7 +137,7 @@ confuse pane names with each other or with command words like `yes`, `no`,
 Good examples:
 
 - `Flux`
-- `Forge`
+- `Brock`
 - `Knox`
 - `Pike`
 - `Slate`
@@ -191,7 +191,7 @@ look like this:
 
 ```text
 +------------------------------+------------------------------+
-| Flux                         | Forge                        |
+| Flux                         | Brock                        |
 | $ codex                      | $ codex                      |
 | > Review phone verification  | > Add backend validation     |
 |                              |                              |
@@ -199,12 +199,12 @@ look like this:
 | Pike                         | Wolf                         |
 | $ codex                      | $ ./run-auto.sh              |
 | > Update Flutter states      | [auto] parakeet-onnx ready   |
-|                              | routes: "forge add tests"    |
+|                              | routes: "brock add tests"    |
 +------------------------------+------------------------------+
 ```
 
-Say `forge add tests for phone verification` to send that prompt to the
-`Forge` pane. If you opt into terminate commands, use the exact phrase you
+Say `brock add tests for phone verification` to send that prompt to the
+`Brock` pane. If you opt into terminate commands, use the exact phrase you
 configured in `auto_tmux_terminate_words`.
 
 ## Notes
@@ -227,6 +227,19 @@ configured in `auto_tmux_terminate_words`.
 - Auto listener console output is appended to
   `${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-auto.log` when the workbench
   starts the listener. Override with `AUTO_LOG=/path/to/auto.log`.
+- Agent pane output is piped through
+  `${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-console.log` by default. After
+  a pane is idle, the listener summarizes the last 50 lines with the configured
+  Gemma/llama.cpp model and prints the original routed command plus a one-line
+  summary. Tune retention with `VOICE_AUTO_TMUX_CONSOLE_RETENTION_SECONDS`, cap
+  size with `VOICE_AUTO_TMUX_CONSOLE_MAX_BYTES`, poll for changes with
+  `VOICE_AUTO_TMUX_CONSOLE_POLL_SECONDS`. Raw pane output is not printed in
+  summary mode; set `VOICE_AUTO_TMUX_SUMMARY_ENABLED=0` only when debugging the
+  pipe itself.
+- Agent panes receive `VOICE_AGENT_SIGNAL_COMMAND`. A running agent can signal
+  completion with `$VOICE_AGENT_SIGNAL_COMMAND done "tests passed"`; the voice
+  listener prints that event from
+  `${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-completions.log`.
 - On Wayland, `ydotoold` may need to be running:
 
 ```bash

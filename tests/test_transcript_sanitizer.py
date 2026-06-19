@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -88,6 +89,130 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             split_trailing_submit_command("submit this send."),
             ("submit this", True),
         )
+
+    def test_trim_auto_tmux_console_log_drops_old_records(self):
+        now = int(time.time())
+        old = now - 7200
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+            path = handle.name
+            handle.write(f"{old}\t[tmux][Flux] stale response\n")
+            handle.write(f"{now}\t[tmux][Flux] current response\n")
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        app.trim_auto_tmux_console_log(
+            path,
+            retention_seconds=3600,
+            max_bytes=1024,
+        )
+
+        with open(path, "r", encoding="utf-8") as handle:
+            log_text = handle.read()
+        self.assertNotIn("stale response", log_text)
+        self.assertIn("current response", log_text)
+
+    def test_split_tmux_console_log_record_accepts_chunk_record(self):
+        line = json.dumps(
+            {
+                "ts": 123.5,
+                "data": "[tmux][Flux] partial response",
+            },
+            separators=(",", ":"),
+        )
+
+        timestamp, payload = app.split_tmux_console_log_record(line)
+
+        self.assertEqual(timestamp, 123.5)
+        self.assertEqual(payload, "[tmux][Flux] partial response")
+
+    def test_extract_tmux_console_agent_payload_removes_prefixes(self):
+        label, payload = app.extract_tmux_console_agent_payload(
+            "[tmux][Brock] line one\n[tmux][Brock] line two\n",
+        )
+
+        self.assertEqual(label, "Brock")
+        self.assertEqual(payload, "line one\nline two\n")
+
+    def test_tmux_console_buffer_flushes_only_after_idle(self):
+        buffer = ["[tmux][Flux] first", " second"]
+        self.assertFalse(
+            app.tmux_console_buffer_should_flush(
+                buffer,
+                last_update_at=10.0,
+                idle_seconds=5.0,
+                now=14.9,
+            )
+        )
+        self.assertTrue(
+            app.tmux_console_buffer_should_flush(
+                buffer,
+                last_update_at=10.0,
+                idle_seconds=5.0,
+                now=15.0,
+            )
+        )
+
+    def test_tmux_recent_command_matches_display_label(self):
+        app.TMUX_RECENT_COMMANDS.clear()
+        self.addCleanup(app.TMUX_RECENT_COMMANDS.clear)
+
+        app.record_tmux_sent_command("brock", "%2", "add focused tests")
+
+        self.assertEqual(
+            app.get_tmux_sent_command("Brock")["text"],
+            "add focused tests",
+        )
+        self.assertEqual(
+            app.get_tmux_sent_command(target="%2")["text"],
+            "add focused tests",
+        )
+
+    def test_build_tmux_summary_messages_include_command_and_lines(self):
+        messages = app.build_tmux_summary_messages(
+            "Brock",
+            "add focused tests",
+            ["edited app.py", "Ran 72 tests OK"],
+        )
+
+        prompt = messages[-1]["content"]
+        self.assertIn("Agent: Brock", prompt)
+        self.assertIn("Original command: add focused tests", prompt)
+        self.assertIn("edited app.py", prompt)
+        self.assertIn("Ran 72 tests OK", prompt)
+
+    def test_agent_completion_record_formats_console_line(self):
+        record = app.parse_agent_completion_record(
+            json.dumps(
+                {
+                    "agent": "Brock",
+                    "status": "done",
+                    "message": "tests passed",
+                }
+            )
+        )
+
+        self.assertEqual(
+            app.format_agent_completion_record(record),
+            "[agent-complete][Brock] done: tests passed",
+        )
+
+    def test_trim_auto_tmux_console_log_caps_size(self):
+        now = int(time.time())
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+            path = handle.name
+            for index in range(20):
+                handle.write(f"{now}\t[tmux][Pike] response line {index:02d}\n")
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        app.trim_auto_tmux_console_log(
+            path,
+            retention_seconds=0,
+            max_bytes=120,
+        )
+
+        with open(path, "r", encoding="utf-8") as handle:
+            log_text = handle.read()
+        self.assertLessEqual(os.path.getsize(path), 120)
+        self.assertIn("response line 19", log_text)
 
     def test_extract_text_after_trigger_word_requires_trigger_at_start(self):
         self.assertIsNone(
@@ -267,6 +392,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertIn("condex", build_command_text_aliases("codex"))
 
     def test_build_command_text_aliases_includes_agent_homophones(self):
+        self.assertIn("block", build_command_text_aliases("brock"))
         self.assertIn("flex", build_command_text_aliases("flux"))
         self.assertIn("pipe", build_command_text_aliases("pike"))
         commands = {"flex": {"label": "flux", "argv": ["tmux"]}}
@@ -419,7 +545,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 result = correct_transcript_text(
                     "Hey Flex what are the daily active users for today",
                     config,
-                    command_labels=["flux", "forge", "pike", "wolf"],
+                    command_labels=["brock", "flux", "pike", "wolf"],
                 )
 
         self.assertEqual(
@@ -483,7 +609,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             details = correct_transcript_details(
                 "",
                 config,
-                command_labels=["flux", "forge", "pike", "wolf"],
+                command_labels=["brock", "flux", "pike", "wolf"],
             )
 
         self.assertEqual(details["raw_transcript"], "")
@@ -607,6 +733,26 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 },
             )
         )
+        self.assertTrue(
+            auto_shell_command_has_explicit_audio(
+                command,
+                {
+                    "raw_transcript": "Hey Wolf terminate session please.",
+                    "pre_llm_transcript": "Hey Wolf terminate session please.",
+                    "corrected_transcript": "wolf terminate session",
+                },
+            )
+        )
+        self.assertFalse(
+            auto_shell_command_has_explicit_audio(
+                command,
+                {
+                    "raw_transcript": "Hey Wolf terminate session after tests.",
+                    "pre_llm_transcript": "Hey Wolf terminate session after tests.",
+                    "corrected_transcript": "wolf terminate session",
+                },
+            )
+        )
 
     def test_auto_tmux_switch_commands_disable_terminate_commands_by_default(self):
         with mock.patch.dict(
@@ -688,6 +834,19 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(
             match_auto_shell_command("Voice confirm terminate session", commands),
             commands["voice confirm terminate session"],
+        )
+        self.assertEqual(
+            match_auto_shell_command(
+                "Voice confirm terminate session please",
+                commands,
+            ),
+            commands["voice confirm terminate session"],
+        )
+        self.assertIsNone(
+            match_auto_shell_command(
+                "Voice confirm terminate session after tests",
+                commands,
+            )
         )
 
     def test_exact_only_command_beats_shorter_prefix_command(self):

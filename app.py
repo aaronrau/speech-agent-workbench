@@ -1,6 +1,7 @@
 import ast
 import bisect
 import gc
+import hashlib
 import json
 import math
 import os
@@ -94,6 +95,22 @@ DEFAULT_CONFIG = {
     "auto_tmux_switch_words": {},
     "auto_enable_terminate_commands": False,
     "auto_tmux_terminate_words": [],
+    "auto_tmux_console_log": None,
+    "auto_tmux_console_replay": True,
+    "auto_tmux_console_retention_seconds": 3600,
+    "auto_tmux_console_max_bytes": 1048576,
+    "auto_tmux_console_trim_interval_seconds": 60,
+    "auto_tmux_console_poll_seconds": 0.05,
+    "auto_tmux_console_idle_flush_seconds": 5.0,
+    "auto_tmux_summary_enabled": True,
+    "auto_tmux_summary_idle_seconds": 5.0,
+    "auto_tmux_summary_lines": 50,
+    "auto_tmux_summary_max_chars": 8000,
+    "auto_tmux_summary_max_new_tokens": 80,
+    "agent_completion_log": None,
+    "agent_completion_log_retention_seconds": 3600,
+    "agent_completion_log_max_bytes": 262144,
+    "agent_completion_log_poll_seconds": 0.2,
     "transcript_correction_backend": "off",
     "transcript_correction_max_new_tokens": 256,
     "transcript_correction_max_chars": 700,
@@ -129,6 +146,7 @@ PARAKEET_ONNX_MODEL_CACHE = {}
 LLAMA_CPP_CORRECTOR_LOCK = threading.Lock()
 TRANSCRIPT_CORRECTION_FAILURES = set()
 LLAMA_CPP_SERVER_PROCESS = None
+TMUX_RECENT_COMMANDS = {}
 ALLOWED_TRANSCRIPT_SYMBOLS = {".", "+"}
 
 
@@ -301,8 +319,8 @@ COMMAND_TOKEN_ALIASES = {
     "three": ("3", "tree", "free"),
     "four": ("4", "for"),
     "codex": ("code x", "condex", "codec", "kodex"),
+    "brock": ("block", "broc"),
     "flux": ("flex", "flax"),
-    "forge": ("forage",),
     "pike": ("pipe", "pyke"),
     "wolf": ("wulf", "wolfe"),
 }
@@ -486,6 +504,30 @@ def normalize_auto_command_phrase(text):
     return " ".join(phrase_words)
 
 
+def strip_control_command_filler(words):
+    filler_words = {"please", "now"}
+    stripped = list(words)
+    while stripped and stripped[-1] in filler_words:
+        stripped.pop()
+    return stripped
+
+
+def match_exact_only_auto_shell_command_with_filler(phrase_words, commands):
+    for command_text, command in commands.items():
+        if command.get("allow_prefix") is not False:
+            continue
+        command_tokens = command_text.split()
+        if not command_tokens:
+            continue
+        if phrase_words[: len(command_tokens)] != command_tokens:
+            continue
+        trailing_words = phrase_words[len(command_tokens) :]
+        if strip_control_command_filler(trailing_words):
+            continue
+        return command
+    return None
+
+
 def match_auto_shell_command(text, commands):
     if not commands:
         return None
@@ -493,6 +535,13 @@ def match_auto_shell_command(text, commands):
     phrase = normalize_auto_command_phrase(text)
     if phrase in commands:
         return commands[phrase]
+    phrase_words = phrase.split()
+    exact_with_filler = match_exact_only_auto_shell_command_with_filler(
+        phrase_words,
+        commands,
+    )
+    if exact_with_filler is not None:
+        return exact_with_filler
 
     prefixes = (
         "switch to",
@@ -586,7 +635,9 @@ def auto_shell_command_has_explicit_audio(command, correction):
     if not aliases:
         return False
     for key in ("raw_transcript", "pre_llm_transcript"):
-        if normalize_auto_command_phrase(correction.get(key)) in aliases:
+        phrase_words = normalize_auto_command_phrase(correction.get(key)).split()
+        phrase = " ".join(strip_control_command_filler(phrase_words))
+        if phrase in aliases:
             return True
     return False
 
@@ -3808,6 +3859,33 @@ def correct_transcript_with_llama_cpp_server(text, config, command_labels=None):
     return str(message.get("content") or "").strip()
 
 
+def run_llama_cpp_chat_completion(config, messages, max_tokens=None, timeout=None):
+    ensure_llama_cpp_server(config)
+    payload = {
+        "messages": messages,
+        "max_tokens": int(max_tokens or get_transcript_correction_max_new_tokens(config)),
+        "temperature": 0,
+        "stream": False,
+    }
+    request = urllib.request.Request(
+        get_transcript_correction_llama_cpp_server_url(config)
+        + "/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(
+        request,
+        timeout=timeout or get_transcript_correction_llama_cpp_timeout(config),
+    ) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    choices = body.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return str(message.get("content") or "").strip()
+
+
 def correct_transcript_with_llama_cpp(text, config, command_labels=None):
     binary_path = resolve_local_runtime_path(
         get_transcript_correction_llama_cpp_path(config)
@@ -4482,6 +4560,620 @@ def append_auto_focus_log(event, **fields):
     except OSError as exc:
         print(f"[auto] unable to write focus log {path}: {exc}", file=sys.stderr)
         return False
+
+
+def get_auto_tmux_console_log_path(config):
+    value = os.environ.get("VOICE_AUTO_TMUX_CONSOLE_LOG")
+    if value is None:
+        value = config.get(
+            "auto_tmux_console_log",
+            DEFAULT_CONFIG["auto_tmux_console_log"],
+        )
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value or value.lower() in ("0", "false", "no", "none", "null", "off"):
+        return None
+    return os.path.expanduser(value)
+
+
+def split_tmux_console_log_record(line):
+    text = str(line or "").rstrip("\n").replace("\x00", "")
+    if text.startswith("{"):
+        try:
+            record = json.loads(text)
+            timestamp = record.get("ts")
+            if timestamp is not None:
+                timestamp = float(timestamp)
+            return timestamp, str(record.get("data") or "")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    timestamp_text, separator, payload = text.partition("\t")
+    if separator and timestamp_text.isdigit():
+        try:
+            return float(timestamp_text), payload
+        except ValueError:
+            pass
+    return None, text
+
+
+def trim_auto_tmux_console_log(path, retention_seconds, max_bytes):
+    if not path:
+        return 0
+    retention_seconds = max(0.0, float(retention_seconds or 0.0))
+    max_bytes = max(0, int(max_bytes or 0))
+    if retention_seconds <= 0 and max_bytes <= 0:
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+
+    try:
+        with open(path, "r+", encoding="utf-8", errors="replace") as handle:
+            data = handle.read()
+            lines = data.splitlines(keepends=True)
+            if retention_seconds > 0:
+                cutoff = time.time() - retention_seconds
+                kept_lines = []
+                for line in lines:
+                    timestamp, _payload = split_tmux_console_log_record(line)
+                    if timestamp is None or timestamp >= cutoff:
+                        kept_lines.append(line)
+            else:
+                kept_lines = lines
+
+            trimmed = "".join(kept_lines)
+            if max_bytes > 0:
+                encoded = trimmed.encode("utf-8", errors="replace")
+                if len(encoded) > max_bytes:
+                    tail = encoded[-max_bytes:]
+                    first_newline = tail.find(b"\n")
+                    if first_newline >= 0 and first_newline + 1 < len(tail):
+                        tail = tail[first_newline + 1 :]
+                    trimmed = tail.decode("utf-8", errors="replace")
+
+            if trimmed != data:
+                handle.seek(0)
+                handle.write(trimmed)
+                handle.truncate()
+                handle.flush()
+            return len(trimmed.encode("utf-8", errors="replace"))
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        print(f"[auto] unable to trim tmux console log {path}: {exc}", file=sys.stderr)
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+
+
+def tmux_console_buffer_should_flush(buffer, last_update_at, idle_seconds, now=None):
+    if not buffer or last_update_at is None:
+        return False
+    if idle_seconds <= 0:
+        return True
+    current = time.monotonic() if now is None else now
+    return current - last_update_at >= idle_seconds
+
+
+def flush_tmux_console_buffer(buffer):
+    if not buffer:
+        return False
+    print("".join(buffer), end="", flush=True)
+    buffer.clear()
+    return True
+
+
+def extract_tmux_console_agent_payload(payload):
+    text = str(payload or "")
+    match = re.search(r"\[tmux\]\[([^\]]+)\]\s*", text)
+    if not match:
+        return None, text
+    label = match.group(1).strip()
+    cleaned = re.sub(
+        r"(^|[\n\r])\[tmux\]\[[^\]]+\]\s*",
+        lambda item: item.group(1),
+        text,
+    )
+    return label, cleaned
+
+
+def tmux_console_payload_to_lines(payload):
+    cleaned = strip_terminal_control_chars(str(payload or "").replace("\r", "\n"))
+    return [line.strip() for line in cleaned.splitlines() if line.strip()]
+
+
+def trim_tmux_agent_lines(lines, max_lines):
+    max_lines = max(1, int(max_lines or 1))
+    if len(lines) > max_lines:
+        del lines[: len(lines) - max_lines]
+    return lines
+
+
+def tmux_summary_digest(command_text, lines):
+    payload = json.dumps(
+        {
+            "command": str(command_text or ""),
+            "lines": list(lines or []),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+
+
+def normalize_tmux_agent_key(value):
+    return normalize_voice_command_text(value)
+
+
+def record_tmux_sent_command(label, target, text):
+    record = {
+        "label": str(label or "").strip(),
+        "target": str(target or "").strip(),
+        "text": str(text or "").strip(),
+        "ts": time.time(),
+    }
+    for key in (
+        normalize_tmux_agent_key(record["label"]),
+        record["target"],
+    ):
+        if key:
+            TMUX_RECENT_COMMANDS[key] = record
+    return record
+
+
+def get_tmux_sent_command(label=None, target=None):
+    for key in (
+        normalize_tmux_agent_key(label),
+        str(target or "").strip(),
+    ):
+        if key and key in TMUX_RECENT_COMMANDS:
+            return TMUX_RECENT_COMMANDS[key]
+    return None
+
+
+def build_tmux_summary_messages(agent_label, command_text, lines):
+    command = str(command_text or "").strip() or "unknown"
+    output = "\n".join(str(line) for line in lines or [])
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You summarize terminal output for a voice-controlled coding "
+                "workbench. Return exactly one concise sentence. Say whether "
+                "the task appears complete, failed, blocked, or still in progress "
+                "when the output supports it. Do not include markdown."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Agent: {agent_label or 'unknown'}\n"
+                f"Original command: {command}\n"
+                "Last terminal output lines:\n"
+                f"{output}\n\n"
+                "One-sentence summary:"
+            ),
+        },
+    ]
+
+
+def clean_one_sentence_summary(text):
+    cleaned = " ".join(str(text or "").split())
+    if not cleaned:
+        return ""
+    match = re.search(r"(.+?[.!?])(?:\s|$)", cleaned)
+    return match.group(1).strip() if match else cleaned
+
+
+def summarize_tmux_agent_output(config, agent_label, command_text, lines):
+    max_tokens = get_config_int(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_MAX_NEW_TOKENS",
+        "auto_tmux_summary_max_new_tokens",
+        DEFAULT_CONFIG["auto_tmux_summary_max_new_tokens"],
+        minimum=16,
+    )
+    messages = build_tmux_summary_messages(agent_label, command_text, lines)
+    summary = run_llama_cpp_chat_completion(
+        config,
+        messages,
+        max_tokens=max_tokens,
+        timeout=get_transcript_correction_llama_cpp_timeout(config),
+    )
+    return clean_one_sentence_summary(summary)
+
+
+def print_tmux_summary(agent_label, command_text, summary):
+    label = agent_label or "tmux"
+    command = str(command_text or "").strip() or "unknown"
+    summary = str(summary or "").strip() or "No summary was returned."
+    print(f"\n[tmux-summary][{label}] Command: {command}")
+    print(f"[tmux-summary][{label}] Summary: {summary}", flush=True)
+
+
+def get_agent_completion_log_path(config):
+    value = os.environ.get("VOICE_AGENT_COMPLETION_LOG")
+    if value is None:
+        value = config.get(
+            "agent_completion_log",
+            DEFAULT_CONFIG["agent_completion_log"],
+        )
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value or value.lower() in ("0", "false", "no", "none", "null", "off"):
+        return None
+    return os.path.expanduser(value)
+
+
+def parse_agent_completion_record(line):
+    try:
+        record = json.loads(str(line or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    agent = str(record.get("agent") or "agent").strip() or "agent"
+    status = str(record.get("status") or "done").strip() or "done"
+    message = str(record.get("message") or "").strip()
+    return {
+        "agent": agent,
+        "status": status,
+        "message": message,
+    }
+
+
+def format_agent_completion_record(record):
+    agent = record.get("agent") or "agent"
+    status = record.get("status") or "done"
+    message = record.get("message") or ""
+    suffix = f": {message}" if message else ""
+    return f"[agent-complete][{agent}] {status}{suffix}"
+
+
+def start_agent_completion_log_tailer(config):
+    path = get_agent_completion_log_path(config)
+    if not path:
+        return None
+
+    retention_seconds = get_config_float(
+        config,
+        "VOICE_AGENT_COMPLETION_LOG_RETENTION_SECONDS",
+        "agent_completion_log_retention_seconds",
+        DEFAULT_CONFIG["agent_completion_log_retention_seconds"],
+        minimum=0.0,
+    )
+    max_bytes = get_config_int(
+        config,
+        "VOICE_AGENT_COMPLETION_LOG_MAX_BYTES",
+        "agent_completion_log_max_bytes",
+        DEFAULT_CONFIG["agent_completion_log_max_bytes"],
+        minimum=0,
+    )
+    poll_seconds = get_config_float(
+        config,
+        "VOICE_AGENT_COMPLETION_LOG_POLL_SECONDS",
+        "agent_completion_log_poll_seconds",
+        DEFAULT_CONFIG["agent_completion_log_poll_seconds"],
+        minimum=0.05,
+    )
+    stop_event = threading.Event()
+
+    def worker():
+        directory = os.path.dirname(path)
+        if directory:
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except OSError as exc:
+                print(
+                    f"[auto] unable to create agent completion log directory: {exc}",
+                    file=sys.stderr,
+                )
+                return
+        try:
+            open(path, "a", encoding="utf-8").close()
+        except OSError as exc:
+            print(
+                f"[auto] unable to create agent completion log {path}: {exc}",
+                file=sys.stderr,
+            )
+            return
+
+        position = os.path.getsize(path)
+        print(f"[auto] agent completion log: {path}")
+        last_trim = 0.0
+        reported_read_error = False
+        while not stop_event.is_set():
+            try:
+                size = os.path.getsize(path)
+                if size < position:
+                    position = 0
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    handle.seek(position)
+                    while True:
+                        line = handle.readline()
+                        if not line:
+                            break
+                        position = handle.tell()
+                        record = parse_agent_completion_record(line)
+                        if record:
+                            print(format_agent_completion_record(record), flush=True)
+
+                now = time.monotonic()
+                if now - last_trim >= 60.0:
+                    new_size = trim_auto_tmux_console_log(
+                        path,
+                        retention_seconds,
+                        max_bytes,
+                    )
+                    if position > new_size:
+                        position = new_size
+                    last_trim = now
+                reported_read_error = False
+            except FileNotFoundError:
+                position = 0
+            except OSError as exc:
+                if not reported_read_error:
+                    print(
+                        f"[auto] unable to read agent completion log {path}: {exc}",
+                        file=sys.stderr,
+                    )
+                    reported_read_error = True
+            stop_event.wait(poll_seconds)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    return stop_event
+
+
+def start_auto_tmux_console_log_tailer(config):
+    path = get_auto_tmux_console_log_path(config)
+    if not path:
+        return None
+
+    replay = get_config_bool(
+        config,
+        "VOICE_AUTO_TMUX_CONSOLE_REPLAY",
+        "auto_tmux_console_replay",
+        DEFAULT_CONFIG["auto_tmux_console_replay"],
+    )
+    retention_seconds = get_config_float(
+        config,
+        "VOICE_AUTO_TMUX_CONSOLE_RETENTION_SECONDS",
+        "auto_tmux_console_retention_seconds",
+        DEFAULT_CONFIG["auto_tmux_console_retention_seconds"],
+        minimum=0.0,
+    )
+    max_bytes = get_config_int(
+        config,
+        "VOICE_AUTO_TMUX_CONSOLE_MAX_BYTES",
+        "auto_tmux_console_max_bytes",
+        DEFAULT_CONFIG["auto_tmux_console_max_bytes"],
+        minimum=0,
+    )
+    trim_interval = get_config_float(
+        config,
+        "VOICE_AUTO_TMUX_CONSOLE_TRIM_INTERVAL_SECONDS",
+        "auto_tmux_console_trim_interval_seconds",
+        DEFAULT_CONFIG["auto_tmux_console_trim_interval_seconds"],
+        minimum=1.0,
+    )
+    poll_seconds = get_config_float(
+        config,
+        "VOICE_AUTO_TMUX_CONSOLE_POLL_SECONDS",
+        "auto_tmux_console_poll_seconds",
+        DEFAULT_CONFIG["auto_tmux_console_poll_seconds"],
+        minimum=0.01,
+    )
+    idle_flush_seconds = get_config_float(
+        config,
+        "VOICE_AUTO_TMUX_CONSOLE_IDLE_FLUSH_SECONDS",
+        "auto_tmux_console_idle_flush_seconds",
+        DEFAULT_CONFIG["auto_tmux_console_idle_flush_seconds"],
+        minimum=0.0,
+    )
+    summary_enabled = get_config_bool(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_ENABLED",
+        "auto_tmux_summary_enabled",
+        DEFAULT_CONFIG["auto_tmux_summary_enabled"],
+    )
+    summary_idle_seconds = get_config_float(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_IDLE_SECONDS",
+        "auto_tmux_summary_idle_seconds",
+        DEFAULT_CONFIG["auto_tmux_summary_idle_seconds"],
+        minimum=0.0,
+    )
+    summary_lines = get_config_int(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_LINES",
+        "auto_tmux_summary_lines",
+        DEFAULT_CONFIG["auto_tmux_summary_lines"],
+        minimum=1,
+    )
+    summary_max_chars = get_config_int(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_MAX_CHARS",
+        "auto_tmux_summary_max_chars",
+        DEFAULT_CONFIG["auto_tmux_summary_max_chars"],
+        minimum=200,
+    )
+    stop_event = threading.Event()
+
+    def worker():
+        directory = os.path.dirname(path)
+        if directory:
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except OSError as exc:
+                print(
+                    f"[auto] unable to create tmux console log directory: {exc}",
+                    file=sys.stderr,
+                )
+                return
+        try:
+            open(path, "a", encoding="utf-8").close()
+        except OSError as exc:
+            print(
+                f"[auto] unable to create tmux console log {path}: {exc}",
+                file=sys.stderr,
+            )
+            return
+
+        if replay:
+            trim_auto_tmux_console_log(
+                path,
+                retention_seconds,
+                max_bytes,
+            )
+            position = 0
+        else:
+            try:
+                position = os.path.getsize(path)
+            except OSError:
+                position = 0
+
+        print(f"[auto] tmux console log: {path}")
+        if summary_enabled:
+            print(
+                "[auto] tmux summaries enabled: "
+                f"last {summary_lines} lines after {summary_idle_seconds:.1f}s idle"
+            )
+        last_trim = 0.0
+        pending_output = []
+        last_output_at = None
+        agent_states = {}
+        reported_read_error = False
+        while not stop_event.is_set():
+            try:
+                saw_output = False
+                updated_agents = set()
+                size = os.path.getsize(path)
+                if size < position:
+                    position = 0
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    handle.seek(position)
+                    while True:
+                        line = handle.readline()
+                        if not line:
+                            break
+                        position = handle.tell()
+                        _timestamp, payload = split_tmux_console_log_record(line)
+                        if payload:
+                            if summary_enabled:
+                                agent_label, agent_payload = (
+                                    extract_tmux_console_agent_payload(payload)
+                                )
+                                if agent_label:
+                                    state = agent_states.setdefault(
+                                        agent_label,
+                                        {
+                                            "chunks": [],
+                                            "lines": [],
+                                            "last_output_at": None,
+                                            "last_digest": None,
+                                        },
+                                    )
+                                    state["chunks"].append(agent_payload)
+                                    updated_agents.add(agent_label)
+                            elif line.startswith("{"):
+                                pending_output.append(payload)
+                            else:
+                                pending_output.append(payload + "\n")
+                            saw_output = True
+
+                now = time.monotonic()
+                if saw_output:
+                    last_output_at = now
+                for agent_label in updated_agents:
+                    agent_states[agent_label]["last_output_at"] = now
+
+                if summary_enabled:
+                    for agent_label, state in list(agent_states.items()):
+                        if not tmux_console_buffer_should_flush(
+                            state["chunks"],
+                            state["last_output_at"],
+                            summary_idle_seconds,
+                            now=now,
+                        ):
+                            continue
+                        lines = tmux_console_payload_to_lines(
+                            "".join(state["chunks"])
+                        )
+                        state["chunks"].clear()
+                        if not lines:
+                            continue
+                        state["lines"].extend(lines)
+                        trim_tmux_agent_lines(state["lines"], summary_lines)
+                        summary_input_lines = list(state["lines"])[-summary_lines:]
+                        while (
+                            summary_max_chars > 0
+                            and len("\n".join(summary_input_lines)) > summary_max_chars
+                            and len(summary_input_lines) > 1
+                        ):
+                            summary_input_lines.pop(0)
+                        command_record = get_tmux_sent_command(agent_label)
+                        command_text = (
+                            command_record.get("text") if command_record else ""
+                        )
+                        digest = tmux_summary_digest(
+                            command_text,
+                            summary_input_lines,
+                        )
+                        if digest == state.get("last_digest"):
+                            continue
+                        state["last_digest"] = digest
+                        try:
+                            summary = summarize_tmux_agent_output(
+                                config,
+                                agent_label,
+                                command_text,
+                                summary_input_lines,
+                            )
+                        except Exception as exc:
+                            print(
+                                f"\n[tmux-summary][{agent_label}] Command: "
+                                f"{command_text or 'unknown'}"
+                            )
+                            print(
+                                f"[tmux-summary][{agent_label}] Summary failed: {exc}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            continue
+                        print_tmux_summary(agent_label, command_text, summary)
+                elif tmux_console_buffer_should_flush(
+                    pending_output,
+                    last_output_at,
+                    idle_flush_seconds,
+                    now=now,
+                ):
+                    flush_tmux_console_buffer(pending_output)
+
+                if now - last_trim >= trim_interval:
+                    new_size = trim_auto_tmux_console_log(
+                        path,
+                        retention_seconds,
+                        max_bytes,
+                    )
+                    if position > new_size:
+                        position = new_size
+                    last_trim = now
+                reported_read_error = False
+            except FileNotFoundError:
+                position = 0
+            except OSError as exc:
+                if not reported_read_error:
+                    print(
+                        f"[auto] unable to read tmux console log {path}: {exc}",
+                        file=sys.stderr,
+                    )
+                    reported_read_error = True
+            stop_event.wait(poll_seconds)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    return stop_event
 
 
 def get_tmux_client_pid():
@@ -5275,6 +5967,8 @@ def send_text_to_tmux_target(command, text):
         text_length=len(text),
         success=True,
     )
+    if text:
+        record_tmux_sent_command(label, target, text)
     return True
 
 
@@ -5552,6 +6246,16 @@ def get_config_int(config, env_name, config_name, default, minimum=None):
     if minimum is not None:
         result = max(int(minimum), result)
     return result
+
+
+def get_config_bool(config, env_name, config_name, default=False):
+    value = os.environ.get(env_name)
+    if value is None:
+        value = config.get(config_name, default)
+    parsed = parse_config_bool(value)
+    if parsed is None:
+        return bool(default)
+    return bool(parsed)
 
 
 def get_config_string(config, env_name, config_name, default=None):
@@ -5938,6 +6642,11 @@ def main():
     auto_vad_detector = build_sherpa_vad(config, sample_rate)
     start_transcript_correction_server_background(config)
     signal_voice_ready(run_mode, transcribe_backend, _transcribe_model_label)
+    tmux_console_log_tailer = None
+    agent_completion_log_tailer = None
+    if run_mode == "auto":
+        tmux_console_log_tailer = start_auto_tmux_console_log_tailer(config)
+        agent_completion_log_tailer = start_agent_completion_log_tailer(config)
 
     def render_meter(level, width=24):
         filled = int(level * width)

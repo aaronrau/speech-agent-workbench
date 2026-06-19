@@ -21,6 +21,9 @@ ATTACH="${ATTACH:-1}"
 AUTO_LOG="${AUTO_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-auto.log}"
 AUTO_PID_FILE="${AUTO_PID_FILE:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-auto.pid}"
 AUTO_FOCUS_LOG="${AUTO_FOCUS_LOG:-${VOICE_AUTO_FOCUS_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-focus.log}}"
+AUTO_CONSOLE_LOG="${AUTO_CONSOLE_LOG:-${VOICE_AUTO_TMUX_CONSOLE_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-console.log}}"
+AUTO_CONSOLE_PIPE="${AUTO_CONSOLE_PIPE:-${VOICE_AUTO_TMUX_CONSOLE_PIPE:-1}}"
+AUTO_COMPLETION_LOG="${AUTO_COMPLETION_LOG:-${VOICE_AGENT_COMPLETION_LOG:-${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-completions.log}}"
 AUTO_READY_FILE="${AUTO_READY_FILE:-${VOICE_READY_FILE:-}}"
 AUTO_READY_TIMEOUT="${AUTO_READY_TIMEOUT:-${VOICE_READY_TIMEOUT:-off}}"
 
@@ -226,7 +229,7 @@ start_agent_window() {
     return
   fi
   tmux new-window -t "$SESSION_NAME" -n "$window_name" -c "$dir"
-  tmux send-keys -t "$SESSION_NAME:$window_name" "$AGENT_COMMAND" C-m
+  tmux send-keys -t "$SESSION_NAME:$window_name" "$(agent_launch_command "$window_name")" C-m
 }
 
 style_window() {
@@ -283,6 +286,13 @@ display_words() {
     "$(normalize_spoken_name "$VOICE_NAME")"
 }
 
+agent_launch_command() {
+  local name="$1"
+  local signal_command="$ROOT/voice-agent-signal.py"
+  printf 'VOICE_AGENT_NAME=%q VOICE_AGENT_COMPLETION_LOG=%q VOICE_AGENT_SIGNAL_COMMAND=%q %s' \
+    "$name" "$AUTO_COMPLETION_LOG" "$signal_command" "$AGENT_COMMAND"
+}
+
 start_agent_panes() {
   local agent1_pane
   local agent2_pane
@@ -301,7 +311,7 @@ start_agent_panes() {
     tmux select-pane -t "$agent1_pane" -T "$AGENT1_NAME"
     tmux set-option -pt "$agent1_pane" @agent_name "$AGENT1_NAME"
     if [[ "$(tmux display-message -p -t "$agent1_pane" '#{pane_current_command}')" == "bash" ]]; then
-      tmux send-keys -t "$agent1_pane" "$AGENT_COMMAND" C-m
+      tmux send-keys -t "$agent1_pane" "$(agent_launch_command "$AGENT1_NAME")" C-m
     fi
   fi
 
@@ -310,7 +320,7 @@ start_agent_panes() {
     agent2_pane="$(tmux split-window -h -t "$agent1_pane" -c "$AGENT2_DIR" -P -F '#{pane_id}')"
     tmux select-pane -t "$agent2_pane" -T "$AGENT2_NAME"
     tmux set-option -pt "$agent2_pane" @agent_name "$AGENT2_NAME"
-    tmux send-keys -t "$agent2_pane" "$AGENT_COMMAND" C-m
+    tmux send-keys -t "$agent2_pane" "$(agent_launch_command "$AGENT2_NAME")" C-m
   fi
 
   agent3_pane="$(get_pane_by_title "$AGENT3_NAME")"
@@ -318,7 +328,7 @@ start_agent_panes() {
     agent3_pane="$(tmux split-window -v -t "$agent2_pane" -c "$AGENT3_DIR" -P -F '#{pane_id}')"
     tmux select-pane -t "$agent3_pane" -T "$AGENT3_NAME"
     tmux set-option -pt "$agent3_pane" @agent_name "$AGENT3_NAME"
-    tmux send-keys -t "$agent3_pane" "$AGENT_COMMAND" C-m
+    tmux send-keys -t "$agent3_pane" "$(agent_launch_command "$AGENT3_NAME")" C-m
   fi
 
   voice_pane="$(get_pane_by_title "$VOICE_NAME")"
@@ -374,8 +384,77 @@ default_switches() {
 }
 
 auto_stt_command() {
-  printf 'VOICE_HOTKEY_CONFIG=%q VOICE_READY_FILE=%q VOICE_CONFIG_PROMPT=0 VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_FOCUS_LOG=%q /bin/bash %q' \
-    "$CONFIG_PATH" "$AUTO_READY_FILE" "$SESSION_NAME" "$AUTO_FOCUS_LOG" "$ROOT/run-auto.sh"
+  printf 'VOICE_HOTKEY_CONFIG=%q VOICE_READY_FILE=%q VOICE_CONFIG_PROMPT=0 VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_FOCUS_LOG=%q VOICE_AUTO_TMUX_CONSOLE_LOG=%q VOICE_AUTO_TMUX_CONSOLE_REPLAY=1 VOICE_AGENT_COMPLETION_LOG=%q /bin/bash %q' \
+    "$CONFIG_PATH" "$AUTO_READY_FILE" "$SESSION_NAME" "$AUTO_FOCUS_LOG" "$AUTO_CONSOLE_LOG" "$AUTO_COMPLETION_LOG" "$ROOT/run-auto.sh"
+}
+
+tmux_console_pipe_enabled() {
+  case "${AUTO_CONSOLE_PIPE,,}" in
+    ""|0|false|no|none|null|off)
+      return 1
+      ;;
+  esac
+  case "${AUTO_CONSOLE_LOG,,}" in
+    ""|0|false|no|none|null|off)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+attach_agent_output_pipe() {
+  local pane="$1"
+  local label="$2"
+  if [[ -z "$pane" ]]; then
+    return
+  fi
+
+  local log_target
+  local bridge_target
+  local prefix_arg
+  printf -v log_target %q "$AUTO_CONSOLE_LOG"
+  printf -v bridge_target %q "$ROOT/tmux-console-bridge.py"
+  printf -v prefix_arg %q "$label"
+
+  tmux pipe-pane -t "$pane" 2>/dev/null || true
+  if ! tmux pipe-pane -t "$pane" "python3 -u $bridge_target $prefix_arg >> $log_target"; then
+    echo "[agents] unable to attach tmux console pipe for $label: $pane" >&2
+  fi
+}
+
+get_window_pane() {
+  local window_name="$1"
+  tmux display-message -p -t "$SESSION_NAME:$window_name.0" '#{pane_id}' 2>/dev/null || true
+}
+
+start_tmux_console_log() {
+  case "${AUTO_STT,,}" in
+    0|off|false|no)
+      return
+      ;;
+  esac
+
+  if ! tmux_console_pipe_enabled; then
+    return
+  fi
+
+  mkdir -p "$(dirname "$AUTO_CONSOLE_LOG")"
+  : >"$AUTO_CONSOLE_LOG"
+
+  case "$AGENT_LAYOUT" in
+    panes)
+      attach_agent_output_pipe "$(get_pane_by_title "$AGENT1_NAME")" "$AGENT1_NAME"
+      attach_agent_output_pipe "$(get_pane_by_title "$AGENT2_NAME")" "$AGENT2_NAME"
+      attach_agent_output_pipe "$(get_pane_by_title "$AGENT3_NAME")" "$AGENT3_NAME"
+      ;;
+    windows)
+      attach_agent_output_pipe "$(get_window_pane "$AGENT1_NAME")" "$AGENT1_NAME"
+      attach_agent_output_pipe "$(get_window_pane "$AGENT2_NAME")" "$AGENT2_NAME"
+      attach_agent_output_pipe "$(get_window_pane "$AGENT3_NAME")" "$AGENT3_NAME"
+      ;;
+  esac
+
+  echo "[agents] tmux agent output console log: $AUTO_CONSOLE_LOG"
 }
 
 start_auto_stt_pane_log() {
@@ -559,6 +638,9 @@ start_auto_stt() {
     VOICE_AUTO_DISPLAY_WORDS="$words" \
     VOICE_AUTO_TRIGGER_WORD="$(normalize_spoken_name "$AGENT1_NAME")" \
     VOICE_AUTO_FOCUS_LOG="$AUTO_FOCUS_LOG" \
+    VOICE_AUTO_TMUX_CONSOLE_LOG="$AUTO_CONSOLE_LOG" \
+    VOICE_AUTO_TMUX_CONSOLE_REPLAY=1 \
+    VOICE_AGENT_COMPLETION_LOG="$AUTO_COMPLETION_LOG" \
     "$ROOT/run-auto.sh" >"$AUTO_LOG" 2>&1 &
   echo "$!" >"$AUTO_PID_FILE"
   wait_for_auto_stt_ready "$!"
@@ -629,7 +711,7 @@ case "$AGENT_LAYOUT" in
   windows)
     if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
       tmux new-session -d -s "$SESSION_NAME" -n "$AGENT1_NAME" -c "$AGENT1_DIR"
-      tmux send-keys -t "$SESSION_NAME:$AGENT1_NAME" "$AGENT_COMMAND" C-m
+      tmux send-keys -t "$SESSION_NAME:$AGENT1_NAME" "$(agent_launch_command "$AGENT1_NAME")" C-m
     else
       start_agent_window "$AGENT1_NAME" "$AGENT1_DIR"
     fi
@@ -644,6 +726,7 @@ case "$AGENT_LAYOUT" in
     exit 1
     ;;
 esac
+start_tmux_console_log
 start_auto_stt
 
 case "$ATTACH" in
