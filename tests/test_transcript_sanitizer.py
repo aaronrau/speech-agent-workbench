@@ -224,17 +224,43 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             }
         }
 
-        with mock.patch.object(app, "send_text_to_tmux_target", return_value=True) as sent:
-            result = app.route_api_message_to_tmux(
-                "Flux",
-                "pull the latest",
-                commands,
-            )
+        with mock.patch.object(app, "run_auto_shell_command", return_value=True) as focus:
+            with mock.patch.object(app, "send_text_to_tmux_target", return_value=True) as sent:
+                result = app.route_api_message_to_tmux(
+                    "Flux",
+                    "pull the latest",
+                    commands,
+                )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["agent"], "flux")
+        self.assertTrue(result["focused"])
         self.assertEqual(result["message"], "pull the latest")
+        focus.assert_called_once_with(commands["flux"])
         sent.assert_called_once_with(commands["flux"], "pull the latest")
+
+    def test_route_api_message_to_tmux_does_not_send_when_focus_fails(self):
+        commands = {
+            "flux": {
+                "label": "flux",
+                "tmux_send_target": "%1",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+            }
+        }
+
+        with mock.patch.object(app, "run_auto_shell_command", return_value=False):
+            with mock.patch.object(app, "send_text_to_tmux_target") as sent:
+                result = app.route_api_message_to_tmux(
+                    "Flux",
+                    "pull the latest",
+                    commands,
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "focus_failed")
+        self.assertFalse(result["focused"])
+        self.assertFalse(result["sent"])
+        sent.assert_not_called()
 
     def test_route_api_message_to_tmux_reports_unknown_agent(self):
         commands = {

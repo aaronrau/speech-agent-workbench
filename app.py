@@ -5025,6 +5025,21 @@ def route_api_message_to_tmux(agent, message, commands):
             "agent": command.get("label") or agent,
             "available_agents": available,
         }
+    focused = run_auto_shell_command(command)
+    if not focused:
+        print(
+            f"[api] failed to focus {command.get('label') or agent}; "
+            "message was not sent",
+            flush=True,
+        )
+        return {
+            "ok": False,
+            "error": "focus_failed",
+            "agent": command.get("label") or agent,
+            "message": body,
+            "focused": False,
+            "sent": False,
+        }
     sent = send_text_to_tmux_target(command, body)
     status = "routed" if sent else "failed to route"
     print(
@@ -5035,6 +5050,7 @@ def route_api_message_to_tmux(agent, message, commands):
     return {
         "ok": bool(sent),
         "agent": command.get("label") or agent,
+        "focused": bool(focused),
         "message": body,
         "sent": bool(sent),
     }
