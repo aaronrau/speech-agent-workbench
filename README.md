@@ -240,6 +240,7 @@ Set `VOICE_TMUX_SUMMARY_WEBHOOK_URL` to receive each tmux summary as JSON:
 {
   "agent": "Flux",
   "command": "pull the latest",
+  "detail": "git pull --ff-only\nAlready up to date.",
   "summary": "Flux pulled the latest changes successfully.",
   "timestamp": 1781852824.8
 }

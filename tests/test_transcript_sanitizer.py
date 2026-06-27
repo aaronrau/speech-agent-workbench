@@ -309,6 +309,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                     "Flux",
                     "pull the latest",
                     "Flux pulled the latest changes.",
+                    "git pull --ff-only\nAlready up to date.",
                 )
             )
 
@@ -319,6 +320,10 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(request.headers["Authorization"], "Bearer secret")
         self.assertEqual(payload["agent"], "Flux")
         self.assertEqual(payload["command"], "pull the latest")
+        self.assertEqual(
+            payload["detail"],
+            "git pull --ff-only\nAlready up to date.",
+        )
         self.assertEqual(payload["summary"], "Flux pulled the latest changes.")
 
     def test_redact_url_for_log_hides_webhook_secrets(self):

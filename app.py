@@ -4800,6 +4800,10 @@ def print_tmux_summary(agent_label, command_text, summary):
     print(f"[tmux-summary][{label}] Summary: {summary}", flush=True)
 
 
+def format_tmux_summary_detail(lines):
+    return "\n".join(str(line) for line in lines or [])
+
+
 SENSITIVE_URL_QUERY_KEYS = {
     "access_token",
     "api_key",
@@ -4897,13 +4901,20 @@ def log_tmux_summary_webhook_configuration(config):
         )
 
 
-def post_tmux_summary_webhook(config, agent_label, command_text, summary):
+def post_tmux_summary_webhook(
+    config,
+    agent_label,
+    command_text,
+    summary,
+    detail="",
+):
     url = get_tmux_summary_webhook_url(config)
     if not url:
         return False
     payload = {
         "agent": str(agent_label or ""),
         "command": str(command_text or ""),
+        "detail": str(detail or ""),
         "summary": str(summary or ""),
         "timestamp": time.time(),
     }
@@ -4926,12 +4937,18 @@ def post_tmux_summary_webhook(config, agent_label, command_text, summary):
         return False
 
 
-def dispatch_tmux_summary_webhook(config, agent_label, command_text, summary):
+def dispatch_tmux_summary_webhook(
+    config,
+    agent_label,
+    command_text,
+    summary,
+    detail="",
+):
     if not get_tmux_summary_webhook_url(config):
         return None
     thread = threading.Thread(
         target=post_tmux_summary_webhook,
-        args=(config, agent_label, command_text, summary),
+        args=(config, agent_label, command_text, summary, detail),
         daemon=True,
     )
     thread.start()
@@ -5566,6 +5583,7 @@ def start_auto_tmux_console_log_tailer(config):
                             agent_label,
                             command_text,
                             summary,
+                            format_tmux_summary_detail(summary_input_lines),
                         )
                 elif tmux_console_buffer_should_flush(
                     pending_output,
