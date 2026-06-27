@@ -4801,7 +4801,13 @@ def print_tmux_summary(agent_label, command_text, summary):
 
 
 def format_tmux_summary_detail(lines):
-    return "\n".join(str(line) for line in lines or [])
+    cleaned = []
+    for line in lines or []:
+        text = strip_terminal_control_chars(str(line or ""))
+        text = re.sub(r"^\s*\[tmux\](?:\[[^\]]+\])?\s*", "", text)
+        if text.strip():
+            cleaned.append(text.strip())
+    return "\n".join(cleaned)
 
 
 SENSITIVE_URL_QUERY_KEYS = {

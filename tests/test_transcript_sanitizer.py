@@ -179,6 +179,18 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertIn("edited app.py", prompt)
         self.assertIn("Ran 72 tests OK", prompt)
 
+    def test_format_tmux_summary_detail_removes_tmux_prefixes(self):
+        self.assertEqual(
+            app.format_tmux_summary_detail(
+                [
+                    "[tmux][Brock] edited app.py",
+                    "[tmux] Ran 72 tests OK",
+                    "plain output",
+                ],
+            ),
+            "edited app.py\nRan 72 tests OK\nplain output",
+        )
+
     def test_agent_completion_record_formats_console_line(self):
         record = app.parse_agent_completion_record(
             json.dumps(
