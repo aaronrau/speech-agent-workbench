@@ -30,13 +30,14 @@ AUTO_READY_TIMEOUT="${AUTO_READY_TIMEOUT:-${VOICE_READY_TIMEOUT:-off}}"
 usage() {
   cat <<'EOF'
 Usage:
-  ./start-agent-workbench.sh [AGENT1_DIR] [AGENT2_DIR] [AGENT3_DIR]
+  ./start-agent-workbench.sh [--disable-stt] [AGENT1_DIR] [AGENT2_DIR] [AGENT3_DIR]
 
 Starts a tmux workbench with three agent panes and one speech listener pane.
 On first launch, review the saved command, pane names, and paths.
 
 Examples:
   ./start-agent-workbench.sh
+  ./start-agent-workbench.sh --disable-stt
   ./start-agent-workbench.sh ~/Code/main ~/Code/api ~/Code/web
 
 Optional environment variables:
@@ -44,6 +45,7 @@ Optional environment variables:
   AGENT_COMMAND='codex --sandbox danger-full-access --ask-for-approval never'
   AGENT_LAYOUT=panes
   AUTO_STT=1
+  VOICE_DISABLE_STT=0
   AUTO_STT_MODE=auto
   ATTACH=1
   AUTO_FOCUS_LOG=/tmp/speech-agent-workbench-focus.log
@@ -55,6 +57,19 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
 fi
+
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --disable-stt)
+      export VOICE_DISABLE_STT=1
+      ;;
+    *)
+      args+=("$arg")
+      ;;
+  esac
+done
+set -- "${args[@]}"
 
 if ! command -v tmux >/dev/null 2>&1; then
   echo "tmux is not installed. Install it with: sudo apt-get install -y tmux" >&2
@@ -384,8 +399,8 @@ default_switches() {
 }
 
 auto_stt_command() {
-  printf 'VOICE_HOTKEY_CONFIG=%q VOICE_READY_FILE=%q VOICE_CONFIG_PROMPT=0 VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_FOCUS_LOG=%q VOICE_AUTO_TMUX_CONSOLE_LOG=%q VOICE_AUTO_TMUX_CONSOLE_REPLAY=1 VOICE_AGENT_COMPLETION_LOG=%q /bin/bash %q' \
-    "$CONFIG_PATH" "$AUTO_READY_FILE" "$SESSION_NAME" "$AUTO_FOCUS_LOG" "$AUTO_CONSOLE_LOG" "$AUTO_COMPLETION_LOG" "$ROOT/run-auto.sh"
+  printf 'VOICE_HOTKEY_CONFIG=%q VOICE_READY_FILE=%q VOICE_CONFIG_PROMPT=0 VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_FOCUS_LOG=%q VOICE_AUTO_TMUX_CONSOLE_LOG=%q VOICE_AUTO_TMUX_CONSOLE_REPLAY=1 VOICE_AGENT_COMPLETION_LOG=%q VOICE_DISABLE_STT=%q /bin/bash %q' \
+    "$CONFIG_PATH" "$AUTO_READY_FILE" "$SESSION_NAME" "$AUTO_FOCUS_LOG" "$AUTO_CONSOLE_LOG" "$AUTO_COMPLETION_LOG" "${VOICE_DISABLE_STT:-0}" "$ROOT/run-auto.sh"
 }
 
 tmux_console_pipe_enabled() {
@@ -490,6 +505,15 @@ auto_ready_timeout_seconds() {
   fi
 }
 
+stt_disabled() {
+  case "${VOICE_DISABLE_STT:-0}" in
+    1|true|yes|on)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 clear_auto_stt_ready() {
   if [[ -z "$AUTO_READY_FILE" ]]; then
     return
@@ -569,7 +593,7 @@ start_auto_stt() {
       fi
       return
     fi
-    if [[ "$(tmux display-message -p -t "$voice_pane" '#{pane_current_command}' 2>/dev/null || true)" == "python" ]]; then
+    if [[ "$(tmux display-message -p -t "$voice_pane" '#{pane_current_command}' 2>/dev/null || true)" == "python" ]] && ! stt_disabled; then
       echo "[agents] auto STT already running in pane: $voice_pane"
       start_auto_stt_pane_log "$voice_pane"
       wait_for_auto_stt_ready
@@ -640,6 +664,7 @@ start_auto_stt() {
     VOICE_AUTO_FOCUS_LOG="$AUTO_FOCUS_LOG" \
     VOICE_AUTO_TMUX_CONSOLE_LOG="$AUTO_CONSOLE_LOG" \
     VOICE_AUTO_TMUX_CONSOLE_REPLAY=1 \
+    VOICE_DISABLE_STT="${VOICE_DISABLE_STT:-0}" \
     VOICE_AGENT_COMPLETION_LOG="$AUTO_COMPLETION_LOG" \
     "$ROOT/run-auto.sh" >"$AUTO_LOG" 2>&1 &
   echo "$!" >"$AUTO_PID_FILE"

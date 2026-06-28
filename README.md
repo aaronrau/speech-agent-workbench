@@ -176,6 +176,17 @@ The app clicks the current mouse position, types the words after the trigger, an
 ./run-auto.sh
 ```
 
+To run the workbench listener services without microphone/STT capture, use:
+
+```bash
+./run-auto.sh --disable-stt
+```
+
+This starts the API, tmux summary tailer, completion tailer, and webhook
+delivery, but audio listening stays permanently paused and Ctrl cannot resume
+STT. `AUTO_STT=0` is different: it skips starting the voice listener process
+entirely.
+
 On interactive launch, the workbench script shows the saved agent command, pane names, and paths. Accept the defaults or update them. The values are saved in `config.json`.
 When launched through `./run-auto.sh`, model downloads and enabled
 transcript-correction assets are checked in the foreground before tmux starts so

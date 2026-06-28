@@ -227,6 +227,17 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(agent, "flux")
         self.assertEqual(message, "pull the latest")
 
+    def test_apply_runtime_cli_flags_sets_disable_stt(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            remaining = app.apply_runtime_cli_flags(["--disable-stt", "--other"])
+
+            self.assertEqual(remaining, ["--other"])
+            self.assertEqual(os.environ["VOICE_DISABLE_STT"], "1")
+
+    def test_stt_disabled_reads_environment(self):
+        with mock.patch.dict("os.environ", {"VOICE_DISABLE_STT": "1"}):
+            self.assertTrue(app.stt_disabled({}))
+
     def test_route_api_message_to_tmux_sends_known_agent(self):
         commands = {
             "flux": {

@@ -137,6 +137,7 @@ DEFAULT_CONFIG = {
     "transcript_correction_llama_cpp_timeout": 20.0,
     "submit_enter_delay_seconds": 0.5,
     "transcript_history_path": "transcript-history.txt",
+    "disable_stt": False,
 }
 
 WTYPE_AVAILABLE = True
@@ -6860,6 +6861,26 @@ def get_run_mode(config):
     return "hotkey"
 
 
+def apply_runtime_cli_flags(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    remaining = []
+    for arg in argv:
+        if arg == "--disable-stt":
+            os.environ["VOICE_DISABLE_STT"] = "1"
+        else:
+            remaining.append(arg)
+    return remaining
+
+
+def stt_disabled(config):
+    return get_config_bool(
+        config,
+        "VOICE_DISABLE_STT",
+        "disable_stt",
+        DEFAULT_CONFIG["disable_stt"],
+    )
+
+
 def get_auto_pause_hotkey(config):
     value = os.environ.get("VOICE_AUTO_PAUSE_HOTKEY")
     if value is None:
@@ -7008,6 +7029,35 @@ def get_auto_initial_scan_sample(total_samples, pre_roll_samples):
     return max(0, int(total_samples) - max(0, int(pre_roll_samples)))
 
 
+def run_auto_with_stt_disabled(config, run_mode):
+    auto_shell_commands = build_auto_tmux_switch_commands(config)
+    start_transcript_correction_server_background(config)
+    signal_voice_ready(run_mode, "disabled", "stt-disabled")
+    log_tmux_summary_webhook_configuration(config)
+    start_auto_tmux_console_log_tailer(config)
+    start_agent_completion_log_tailer(config)
+    start_voice_api_server(config, auto_shell_commands)
+    print(
+        "[auto] STT disabled by --disable-stt; audio listening is permanently "
+        "paused and Ctrl resume is disabled.",
+        flush=True,
+    )
+    if auto_shell_commands:
+        labels = sorted(
+            {
+                str(command.get("label") or "").strip()
+                for command in auto_shell_commands.values()
+                if command.get("label")
+            }
+        )
+        print("[auto] switch words=" + ", ".join(labels), flush=True)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\n[auto] stopped.")
+
+
 def click_mouse_left():
     if YDOTOOL_AVAILABLE and shutil.which("ydotool"):
         log_paste_debug("click: using ydotool")
@@ -7026,6 +7076,7 @@ def click_mouse_left():
 
 
 def main():
+    apply_runtime_cli_flags()
     config_path = os.environ.get("VOICE_HOTKEY_CONFIG", "config.json")
     config = load_config(config_path)
     global PASTE_DEBUG_DEFAULT
@@ -7046,6 +7097,12 @@ def main():
     channels = int(config.get("channels", 1))
     run_mode = get_run_mode(config)
     transcript_history_path = get_transcript_history_path(config)
+    if stt_disabled(config):
+        if run_mode != "auto":
+            print("[hotkey] STT disabled; hotkey recording will not start.")
+            return
+        run_auto_with_stt_disabled(config, run_mode)
+        return
     auto_pause_hotkey = (
         get_auto_pause_hotkey(config) if run_mode == "auto" else None
     )

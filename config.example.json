@@ -55,6 +55,7 @@
   "chunk_vad_threshold": 0.012,
   "chunked_transcription": true,
   "device": null,
+  "disable_stt": false,
   "fallback_backend": null,
   "faster_whisper_compute_type": "int8",
   "faster_whisper_device": "cpu",

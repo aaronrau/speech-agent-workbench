@@ -8,6 +8,19 @@ export VOICE_HOTKEY_CONFIG="$CONFIG_PATH"
 VAD_MODEL="${VOICE_AUTO_SHERPA_VAD_MODEL:-$ROOT/models/silero_vad.onnx}"
 VAD_URL="${VOICE_AUTO_SHERPA_VAD_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx}"
 
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --disable-stt)
+      export VOICE_DISABLE_STT=1
+      ;;
+    *)
+      args+=("$arg")
+      ;;
+  esac
+done
+set -- "${args[@]}"
+
 load_auto_config_defaults() {
   python3 - "$CONFIG_PATH" "$ROOT" <<'PY'
 import json
@@ -160,7 +173,11 @@ prefetch_voice_models() {
       ;;
   esac
 
-  echo "[auto] checking voice model downloads before starting workbench..."
+  if [[ "${VOICE_DISABLE_STT:-0}" == "1" ]]; then
+    echo "[auto] STT disabled; checking non-STT runtime assets before starting workbench..."
+  else
+    echo "[auto] checking voice model downloads before starting workbench..."
+  fi
   VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_PREFETCH_ONLY=1 "$ROOT/run.sh"
 }
 

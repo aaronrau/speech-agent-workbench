@@ -8,6 +8,19 @@ PYTHON_BIN="$VENV_ROOT/bin/python"
 VAD_MODEL="${VOICE_AUTO_SHERPA_VAD_MODEL:-$ROOT/models/silero_vad.onnx}"
 VAD_URL="${VOICE_AUTO_SHERPA_VAD_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx}"
 
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --disable-stt)
+      export VOICE_DISABLE_STT=1
+      ;;
+    *)
+      args+=("$arg")
+      ;;
+  esac
+done
+set -- "${args[@]}"
+
 export PYTHONUNBUFFERED=1
 export VOICE_HOTKEY_CONFIG="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
 export VOICE_REMOTE_URL="${VOICE_REMOTE_URL:-http://127.0.0.1:8765/transcribe}"
@@ -507,18 +520,22 @@ if is_wayland; then
 fi
 
 ensure_python_env
-maybe_enable_remote_backend
-select_default_transcribe_backend
-ensure_faster_whisper
-ensure_nemo_canary
-ensure_parakeet_onnx
-ensure_parakeet_onnx_model
-log_backend_fallback
-ensure_auto_vad_model
+if is_truthy "${VOICE_DISABLE_STT:-0}"; then
+  echo "[run] STT disabled; skipping STT backend and VAD setup." >&2
+else
+  maybe_enable_remote_backend
+  select_default_transcribe_backend
+  ensure_faster_whisper
+  ensure_nemo_canary
+  ensure_parakeet_onnx
+  ensure_parakeet_onnx_model
+  log_backend_fallback
+  ensure_auto_vad_model
+fi
 ensure_transcript_correction_assets
 if is_truthy "${VOICE_PREFETCH_ONLY:-0}"; then
   echo "[run] model prefetch complete." >&2
   exit 0
 fi
 
-exec "$PYTHON_BIN" "$ROOT/app.py"
+exec "$PYTHON_BIN" "$ROOT/app.py" "$@"
