@@ -294,6 +294,8 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(result["available_agents"], ["flux"])
 
     def test_post_tmux_summary_webhook_sends_json_payload(self):
+        app.TMUX_WEBHOOK_LAST_DETAIL_LINES.clear()
+        self.addCleanup(app.TMUX_WEBHOOK_LAST_DETAIL_LINES.clear)
         config = {
             "tmux_summary_webhook_url": "http://127.0.0.1:9999/hook",
             "tmux_summary_webhook_token": "secret",
@@ -336,7 +338,134 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             payload["detail"],
             "git pull --ff-only\nAlready up to date.",
         )
+        self.assertEqual(
+            payload["detail_lines"],
+            ["git pull --ff-only", "Already up to date."],
+        )
+        self.assertEqual(payload["detail_line_count"], 2)
+        self.assertFalse(payload["is_final"])
+        self.assertEqual(payload["phase"], "in_progress")
         self.assertEqual(payload["summary"], "Flux pulled the latest changes.")
+
+    def test_post_tmux_summary_webhook_sends_only_new_detail_lines(self):
+        app.TMUX_WEBHOOK_LAST_DETAIL_LINES.clear()
+        self.addCleanup(app.TMUX_WEBHOOK_LAST_DETAIL_LINES.clear)
+        config = {"tmux_summary_webhook_url": "http://127.0.0.1:9999/hook"}
+        requests = []
+
+        class Response:
+            status = 204
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+        def fake_urlopen(request, timeout):
+            requests.append(request)
+            return Response()
+
+        with mock.patch.object(app.urllib.request, "urlopen", side_effect=fake_urlopen):
+            self.assertTrue(
+                app.post_tmux_summary_webhook(
+                    config,
+                    "Pike",
+                    "run tests",
+                    "Pike started tests.",
+                    detail_lines=["line one", "line two"],
+                )
+            )
+            self.assertTrue(
+                app.post_tmux_summary_webhook(
+                    config,
+                    "Pike",
+                    "run tests",
+                    "Pike is still running tests.",
+                    detail_lines=["line two", "line three"],
+                )
+            )
+
+        first_payload = json.loads(requests[0].data.decode("utf-8"))
+        second_payload = json.loads(requests[1].data.decode("utf-8"))
+        self.assertEqual(first_payload["detail_lines"], ["line one", "line two"])
+        self.assertEqual(second_payload["detail"], "line three")
+        self.assertEqual(second_payload["detail_lines"], ["line three"])
+        self.assertEqual(second_payload["detail_line_count"], 1)
+
+    def test_build_tmux_summary_webhook_payload_marks_final_completion(self):
+        payload = app.build_tmux_summary_webhook_payload(
+            "Brock",
+            "run tests",
+            "Brock signaled done: tests passed.",
+            detail_lines=["[tmux][Brock] pytest", "[tmux] 84 passed"],
+            phase="final",
+            completion_status="done",
+            completion_message="tests passed",
+        )
+
+        self.assertEqual(payload["detail"], "pytest\n84 passed")
+        self.assertEqual(payload["detail_lines"], ["pytest", "84 passed"])
+        self.assertTrue(payload["is_final"])
+        self.assertEqual(payload["phase"], "final")
+        self.assertEqual(payload["completion_status"], "done")
+        self.assertEqual(payload["completion_message"], "tests passed")
+
+    def test_tmux_summary_webhook_excludes_voice_agent(self):
+        config = {
+            "agent_workbench": {"voice": {"name": "Wolf"}},
+            "tmux_summary_webhook_url": "http://127.0.0.1:9999/hook",
+        }
+
+        with mock.patch.object(app.urllib.request, "urlopen") as urlopen:
+            self.assertFalse(
+                app.post_tmux_summary_webhook(
+                    config,
+                    "Wolf",
+                    "listen",
+                    "Wolf is listening.",
+                    detail_lines=["voice pane output"],
+                )
+            )
+
+        urlopen.assert_not_called()
+
+    def test_completion_webhook_excludes_voice_agent(self):
+        config = {
+            "agent_workbench": {"voice": {"name": "Wolf"}},
+            "tmux_summary_webhook_url": "http://127.0.0.1:9999/hook",
+        }
+        record = {"agent": "Wolf", "status": "done", "message": "idle"}
+
+        with mock.patch.object(app, "dispatch_tmux_summary_webhook") as dispatch:
+            self.assertIsNone(
+                app.dispatch_agent_completion_summary_webhook(config, record)
+            )
+
+        dispatch.assert_not_called()
+
+    def test_agent_completion_webhook_uses_latest_summary_snapshot(self):
+        app.TMUX_SUMMARY_SNAPSHOTS.clear()
+        self.addCleanup(app.TMUX_SUMMARY_SNAPSHOTS.clear)
+        app.record_tmux_summary_snapshot(
+            "Brock",
+            "run tests",
+            "Tests are still running.",
+            ["pytest started"],
+        )
+
+        config = {"tmux_summary_webhook_url": "http://127.0.0.1:9999/hook"}
+        record = {"agent": "Brock", "status": "done", "message": "tests passed"}
+        with mock.patch.object(app, "dispatch_tmux_summary_webhook") as dispatch:
+            app.dispatch_agent_completion_summary_webhook(config, record)
+
+        dispatch.assert_called_once()
+        args, kwargs = dispatch.call_args
+        self.assertEqual(args[:4], (config, "Brock", "run tests", "Brock signaled done: tests passed"))
+        self.assertEqual(kwargs["detail_lines"], ["pytest started"])
+        self.assertEqual(kwargs["phase"], "final")
+        self.assertEqual(kwargs["completion_status"], "done")
+        self.assertEqual(kwargs["completion_message"], "tests passed")
 
     def test_redact_url_for_log_hides_webhook_secrets(self):
         url = "https://user:pass@example.test/hook?token=abc&api_key=xyz&mode=dev"

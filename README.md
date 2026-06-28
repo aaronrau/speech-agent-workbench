@@ -241,10 +241,24 @@ Set `VOICE_TMUX_SUMMARY_WEBHOOK_URL` to receive each tmux summary as JSON:
   "agent": "Flux",
   "command": "pull the latest",
   "detail": "git pull --ff-only\nAlready up to date.",
+  "detail_line_count": 2,
+  "detail_lines": ["git pull --ff-only", "Already up to date."],
+  "is_final": false,
+  "phase": "in_progress",
   "summary": "Flux pulled the latest changes successfully.",
   "timestamp": 1781852824.8
 }
 ```
+
+Idle tmux summaries use `"phase": "in_progress"`. When an agent calls
+`$VOICE_AGENT_SIGNAL_COMMAND done "tests passed"`, the webhook sends a final
+event with `"phase": "final"`, `"is_final": true`, and the latest captured
+`detail_lines` for that agent.
+Webhook detail lines are incremental per agent: lines already delivered in the
+previous webhook payload for that same agent are omitted from the next
+`detail`/`detail_lines` value.
+The voice listener pane is excluded from summary webhook delivery, including
+the default `Voice` name and local `Wolf` voice pane name.
 
 Use `VOICE_TMUX_SUMMARY_WEBHOOK_TOKEN` to send an `Authorization: Bearer ...`
 header and `VOICE_TMUX_SUMMARY_WEBHOOK_TIMEOUT` to tune the POST timeout.

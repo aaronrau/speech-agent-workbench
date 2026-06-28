@@ -155,6 +155,10 @@ LLAMA_CPP_CORRECTOR_LOCK = threading.Lock()
 TRANSCRIPT_CORRECTION_FAILURES = set()
 LLAMA_CPP_SERVER_PROCESS = None
 TMUX_RECENT_COMMANDS = {}
+TMUX_SUMMARY_SNAPSHOTS = {}
+TMUX_SUMMARY_SNAPSHOTS_LOCK = threading.Lock()
+TMUX_WEBHOOK_LAST_DETAIL_LINES = {}
+TMUX_WEBHOOK_LAST_DETAIL_LINES_LOCK = threading.Lock()
 ALLOWED_TRANSCRIPT_SYMBOLS = {".", "+"}
 
 
@@ -4800,14 +4804,80 @@ def print_tmux_summary(agent_label, command_text, summary):
     print(f"[tmux-summary][{label}] Summary: {summary}", flush=True)
 
 
-def format_tmux_summary_detail(lines):
+def format_tmux_summary_detail_lines(lines):
     cleaned = []
     for line in lines or []:
         text = strip_terminal_control_chars(str(line or ""))
         text = re.sub(r"^\s*\[tmux\](?:\[[^\]]+\])?\s*", "", text)
         if text.strip():
             cleaned.append(text.strip())
-    return "\n".join(cleaned)
+    return cleaned
+
+
+def format_tmux_summary_detail(lines):
+    return "\n".join(format_tmux_summary_detail_lines(lines))
+
+
+def normalize_tmux_summary_phase(phase):
+    value = str(phase or "").strip().lower().replace("-", "_")
+    if value in ("final", "done", "complete", "completed"):
+        return "final"
+    return "in_progress"
+
+
+def record_tmux_summary_snapshot(
+    agent_label,
+    command_text,
+    summary,
+    detail_lines,
+    phase="in_progress",
+):
+    detail_lines = format_tmux_summary_detail_lines(detail_lines)
+    snapshot = {
+        "agent": str(agent_label or ""),
+        "command": str(command_text or ""),
+        "detail": format_tmux_summary_detail(detail_lines),
+        "detail_lines": detail_lines,
+        "phase": normalize_tmux_summary_phase(phase),
+        "summary": str(summary or ""),
+        "timestamp": time.time(),
+    }
+    key = normalize_tmux_agent_key(agent_label)
+    if key:
+        with TMUX_SUMMARY_SNAPSHOTS_LOCK:
+            TMUX_SUMMARY_SNAPSHOTS[key] = snapshot
+    return snapshot
+
+
+def get_tmux_summary_snapshot(agent_label):
+    key = normalize_tmux_agent_key(agent_label)
+    if not key:
+        return None
+    with TMUX_SUMMARY_SNAPSHOTS_LOCK:
+        snapshot = TMUX_SUMMARY_SNAPSHOTS.get(key)
+        return dict(snapshot) if snapshot else None
+
+
+def filter_repeated_tmux_webhook_detail_lines(agent_label, detail_lines):
+    current_lines = format_tmux_summary_detail_lines(detail_lines)
+    key = normalize_tmux_agent_key(agent_label)
+    if not key:
+        return current_lines, current_lines
+    with TMUX_WEBHOOK_LAST_DETAIL_LINES_LOCK:
+        previous_lines = TMUX_WEBHOOK_LAST_DETAIL_LINES.get(key, [])
+        previous = set(previous_lines)
+    return [line for line in current_lines if line not in previous], current_lines
+
+
+def record_tmux_webhook_sent_detail_lines(agent_label, detail_lines):
+    key = normalize_tmux_agent_key(agent_label)
+    if not key:
+        return None
+    with TMUX_WEBHOOK_LAST_DETAIL_LINES_LOCK:
+        TMUX_WEBHOOK_LAST_DETAIL_LINES[key] = format_tmux_summary_detail_lines(
+            detail_lines
+        )
+    return TMUX_WEBHOOK_LAST_DETAIL_LINES[key]
 
 
 SENSITIVE_URL_QUERY_KEYS = {
@@ -4907,23 +4977,92 @@ def log_tmux_summary_webhook_configuration(config):
         )
 
 
+def get_webhook_excluded_agent_names(config):
+    names = {"voice", "wolf"}
+    settings = config.get("agent_workbench") if isinstance(config, dict) else {}
+    legacy_settings = config.get("codex_agents") if isinstance(config, dict) else {}
+    for source in (settings, legacy_settings):
+        if not isinstance(source, dict):
+            continue
+        voice = source.get("voice")
+        if isinstance(voice, dict):
+            name = str(voice.get("name") or "").strip()
+            if name:
+                names.add(name)
+    for env_name in ("VOICE_NAME", "CONFIG_VOICE_NAME", "AUTO_VOICE_NAME"):
+        value = str(os.environ.get(env_name) or "").strip()
+        if value:
+            names.add(value)
+    return {normalize_voice_command_text(name) for name in names if name}
+
+
+def tmux_summary_webhook_agent_excluded(config, agent_label):
+    key = normalize_voice_command_text(agent_label)
+    return bool(key and key in get_webhook_excluded_agent_names(config))
+
+
+def build_tmux_summary_webhook_payload(
+    agent_label,
+    command_text,
+    summary,
+    detail="",
+    detail_lines=None,
+    phase="in_progress",
+    completion_status="",
+    completion_message="",
+):
+    if detail_lines is None:
+        detail_lines = str(detail or "").splitlines()
+    detail_lines = format_tmux_summary_detail_lines(detail_lines)
+    phase = normalize_tmux_summary_phase(phase)
+    payload = {
+        "agent": str(agent_label or ""),
+        "command": str(command_text or ""),
+        "detail": format_tmux_summary_detail(detail_lines),
+        "detail_line_count": len(detail_lines),
+        "detail_lines": detail_lines,
+        "is_final": phase == "final",
+        "phase": phase,
+        "summary": str(summary or ""),
+        "timestamp": time.time(),
+    }
+    if completion_status or completion_message:
+        payload["completion_status"] = str(completion_status or "")
+        payload["completion_message"] = str(completion_message or "")
+    return payload
+
+
 def post_tmux_summary_webhook(
     config,
     agent_label,
     command_text,
     summary,
     detail="",
+    detail_lines=None,
+    phase="in_progress",
+    completion_status="",
+    completion_message="",
 ):
     url = get_tmux_summary_webhook_url(config)
     if not url:
         return False
-    payload = {
-        "agent": str(agent_label or ""),
-        "command": str(command_text or ""),
-        "detail": str(detail or ""),
-        "summary": str(summary or ""),
-        "timestamp": time.time(),
-    }
+    if tmux_summary_webhook_agent_excluded(config, agent_label):
+        return False
+    if detail_lines is None:
+        detail_lines = str(detail or "").splitlines()
+    detail_lines, sent_detail_lines = filter_repeated_tmux_webhook_detail_lines(
+        agent_label,
+        detail_lines,
+    )
+    payload = build_tmux_summary_webhook_payload(
+        agent_label,
+        command_text,
+        summary,
+        detail_lines=detail_lines,
+        phase=phase,
+        completion_status=completion_status,
+        completion_message=completion_message,
+    )
     headers = {"Content-Type": "application/json"}
     token = get_tmux_summary_webhook_token(config)
     if token:
@@ -4937,7 +5076,10 @@ def post_tmux_summary_webhook(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return 200 <= int(getattr(response, "status", 200)) < 300
+            success = 200 <= int(getattr(response, "status", 200)) < 300
+            if success:
+                record_tmux_webhook_sent_detail_lines(agent_label, sent_detail_lines)
+            return success
     except Exception as exc:
         print(f"[tmux-summary] webhook failed: {exc}", file=sys.stderr)
         return False
@@ -4949,12 +5091,37 @@ def dispatch_tmux_summary_webhook(
     command_text,
     summary,
     detail="",
+    detail_lines=None,
+    phase="in_progress",
+    completion_status="",
+    completion_message="",
 ):
+    if tmux_summary_webhook_agent_excluded(config, agent_label):
+        return None
+    if detail_lines is None:
+        detail_lines = str(detail or "").splitlines()
+    snapshot = record_tmux_summary_snapshot(
+        agent_label,
+        command_text,
+        summary,
+        detail_lines,
+        phase=phase,
+    )
     if not get_tmux_summary_webhook_url(config):
         return None
     thread = threading.Thread(
         target=post_tmux_summary_webhook,
-        args=(config, agent_label, command_text, summary, detail),
+        args=(
+            config,
+            agent_label,
+            command_text,
+            summary,
+            snapshot["detail"],
+            snapshot["detail_lines"],
+            snapshot["phase"],
+            completion_status,
+            completion_message,
+        ),
         daemon=True,
     )
     thread.start()
@@ -5272,6 +5439,37 @@ def format_agent_completion_record(record):
     return f"[agent-complete][{agent}] {status}{suffix}"
 
 
+def build_agent_completion_summary(record):
+    agent = str(record.get("agent") or "agent").strip() or "agent"
+    status = str(record.get("status") or "done").strip() or "done"
+    message = str(record.get("message") or "").strip()
+    suffix = f": {message}" if message else "."
+    return f"{agent} signaled {status}{suffix}"
+
+
+def dispatch_agent_completion_summary_webhook(config, record):
+    if not get_tmux_summary_webhook_url(config):
+        return None
+    agent = str(record.get("agent") or "agent").strip() or "agent"
+    if tmux_summary_webhook_agent_excluded(config, agent):
+        return None
+    snapshot = get_tmux_summary_snapshot(agent) or {}
+    command_text = str(snapshot.get("command") or "").strip()
+    if not command_text:
+        command_record = get_tmux_sent_command(agent)
+        command_text = command_record.get("text") if command_record else ""
+    return dispatch_tmux_summary_webhook(
+        config,
+        agent,
+        command_text,
+        build_agent_completion_summary(record),
+        detail_lines=snapshot.get("detail_lines") or [],
+        phase="final",
+        completion_status=record.get("status") or "",
+        completion_message=record.get("message") or "",
+    )
+
+
 def start_agent_completion_log_tailer(config):
     path = get_agent_completion_log_path(config)
     if not path:
@@ -5339,6 +5537,7 @@ def start_agent_completion_log_tailer(config):
                         record = parse_agent_completion_record(line)
                         if record:
                             print(format_agent_completion_record(record), flush=True)
+                            dispatch_agent_completion_summary_webhook(config, record)
 
                 now = time.monotonic()
                 if now - last_trim >= 60.0:
@@ -5589,7 +5788,8 @@ def start_auto_tmux_console_log_tailer(config):
                             agent_label,
                             command_text,
                             summary,
-                            format_tmux_summary_detail(summary_input_lines),
+                            detail_lines=summary_input_lines,
+                            phase="in_progress",
                         )
                 elif tmux_console_buffer_should_flush(
                     pending_output,
