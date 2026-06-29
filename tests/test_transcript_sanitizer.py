@@ -304,6 +304,37 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(result["error"], "unknown_agent")
         self.assertEqual(result["available_agents"], ["flux"])
 
+    def test_route_api_message_to_tmux_runs_exact_control_command(self):
+        commands = {
+            "wolf": {
+                "label": "wolf",
+                "tmux_send_target": "%1",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+            },
+            "wolf terminate session": {
+                "label": "wolf terminate session",
+                "argv": ["tmux", "kill-session", "-t", "speech-agent-workbench"],
+                "exit_after": True,
+                "allow_prefix": False,
+                "requires_explicit_audio": True,
+            },
+        }
+
+        with mock.patch.object(app, "run_auto_shell_command", return_value=True) as run:
+            with mock.patch.object(app, "send_text_to_tmux_target") as sent:
+                result = app.route_api_message_to_tmux(
+                    "Wolf",
+                    "terminate session.",
+                    commands,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["control"])
+        self.assertEqual(result["agent"], "wolf")
+        self.assertFalse(result["sent"])
+        run.assert_called_once_with(commands["wolf terminate session"])
+        sent.assert_not_called()
+
     def test_post_tmux_summary_webhook_sends_json_payload(self):
         app.TMUX_WEBHOOK_LAST_DETAIL_LINES.clear()
         self.addCleanup(app.TMUX_WEBHOOK_LAST_DETAIL_LINES.clear)

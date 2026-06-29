@@ -5216,6 +5216,34 @@ def route_api_message_to_tmux(agent, message, commands):
             "agent": command.get("label") or agent,
             "available_agents": available,
         }
+    control_text = f"{str(agent or '').strip()} {body}".strip()
+    control_command = safe_match_auto_shell_command(control_text, commands)
+    if control_command is not None and not control_command.get("tmux_send_target"):
+        correction = {
+            "raw_transcript": control_text,
+            "pre_llm_transcript": control_text,
+            "corrected_transcript": control_text,
+        }
+        if not auto_shell_command_allowed(control_command, correction):
+            return {
+                "ok": False,
+                "error": "control_command_rejected",
+                "agent": command.get("label") or agent,
+                "message": body,
+                "sent": False,
+            }
+        ran = run_auto_shell_command(control_command)
+        print(
+            f"[api] ran control command: {control_command.get('label') or control_text}",
+            flush=True,
+        )
+        return {
+            "ok": bool(ran),
+            "agent": command.get("label") or agent,
+            "control": True,
+            "message": body,
+            "sent": False,
+        }
     focused = run_auto_shell_command(command)
     if not focused:
         print(
