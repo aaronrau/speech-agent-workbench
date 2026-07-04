@@ -242,6 +242,21 @@ You can also pass the agent separately:
 {"agent":"Flux","message":"pull the latest"}
 ```
 
+To request an on-demand local summary of an agent's latest tmux output without
+sending text to that agent, pass `"type": "local"`:
+
+```json
+{"type":"local","agent":"Flux","message":"progress_summary"}
+```
+
+Local messages read the configured agent tmux pane with a read-only
+`capture-pane` call, falling back to the configured tmux console log when live
+capture is unavailable. They run the same local llama.cpp summary flow used by
+idle tmux summaries. The JSON response includes `summary`, `detail`, and
+`detail_lines`; `detail` is the cleaned current tail of that agent's tmux
+output. Local messages return this payload directly and do not emit the summary
+webhook.
+
 Only configured agent targets are accepted. Unknown names return a JSON error
 with the available agents.
 

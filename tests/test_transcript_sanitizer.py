@@ -227,6 +227,22 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(agent, "flux")
         self.assertEqual(message, "pull the latest")
 
+    def test_parse_api_message_request_accepts_local_type(self):
+        request, error = app.parse_api_message_request(
+            b'{"type":"local","agent":"Flux"}',
+            "application/json",
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(
+            request,
+            {
+                "type": "local",
+                "agent": "Flux",
+                "message": "progress_summary",
+            },
+        )
+
     def test_apply_runtime_cli_flags_sets_disable_stt(self):
         with mock.patch.dict("os.environ", {}, clear=True):
             remaining = app.apply_runtime_cli_flags(
@@ -335,6 +351,124 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(result["agent"], "wolf")
         self.assertFalse(result["sent"])
         run.assert_called_once_with(commands["wolf terminate session"])
+        sent.assert_not_called()
+
+    def test_route_api_local_summary_reads_agent_log_without_tmux_send(self):
+        commands = {
+            "flux": {
+                "label": "Flux",
+                "tmux_send_target": "%1",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+            },
+            "pike": {
+                "label": "Pike",
+                "tmux_send_target": "%2",
+                "argv": ["tmux", "select-pane", "-t", "%2"],
+            },
+        }
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as handle:
+            for record in (
+                {"ts": 1, "data": "[tmux][Flux] npm test\n"},
+                {"ts": 2, "data": "[tmux][Pike] ignored output\n"},
+                {"ts": 3, "data": "[tmux][Flux] tests passed\n"},
+            ):
+                handle.write(json.dumps(record) + "\n")
+            handle.flush()
+
+            config = {
+                "auto_tmux_console_log": handle.name,
+                "auto_tmux_summary_lines": 10,
+                "auto_tmux_summary_max_chars": 8000,
+            }
+            with mock.patch.object(
+                app,
+                "summarize_tmux_agent_output",
+                return_value="Flux ran the tests successfully.",
+            ) as summarize:
+                with mock.patch.object(app.shutil, "which", return_value=None):
+                    with mock.patch.object(app, "dispatch_tmux_summary_webhook") as dispatch:
+                        with mock.patch.object(app, "run_auto_shell_command") as focus:
+                            with mock.patch.object(app, "send_text_to_tmux_target") as sent:
+                                result = app.route_api_local_summary(
+                                    config,
+                                    "Flux",
+                                    "progress_summary",
+                                    commands,
+                                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["type"], "local")
+        self.assertEqual(result["agent"], "Flux")
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["summary"], "Flux ran the tests successfully.")
+        self.assertEqual(result["detail"], "npm test\ntests passed")
+        self.assertEqual(result["detail_lines"], ["npm test", "tests passed"])
+        self.assertEqual(result["detail_line_count"], 2)
+        self.assertEqual(result["source"], "tmux_console_log")
+        summarize.assert_called_once_with(
+            config,
+            "Flux",
+            "",
+            ["npm test", "tests passed"],
+        )
+        dispatch.assert_not_called()
+        focus.assert_not_called()
+        sent.assert_not_called()
+
+    def test_route_api_local_summary_prefers_live_tmux_capture(self):
+        commands = {
+            "pike": {
+                "label": "Pike",
+                "tmux_send_target": "%2",
+                "argv": ["tmux", "select-pane", "-t", "%2"],
+            },
+        }
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"ts": 1, "data": "[tmux][Pike] stale log line\n"}) + "\n")
+            handle.flush()
+
+            config = {
+                "auto_tmux_console_log": handle.name,
+                "auto_tmux_summary_lines": 2,
+                "auto_tmux_summary_max_chars": 8000,
+            }
+            capture = mock.Mock(
+                returncode=0,
+                stdout="[tmux][Pike] latest live line\nnewest live line\n",
+                stderr="",
+            )
+            with mock.patch.object(app.shutil, "which", return_value="/usr/bin/tmux"):
+                with mock.patch.object(app, "run_command", return_value=capture) as run:
+                    with mock.patch.object(
+                        app,
+                        "summarize_tmux_agent_output",
+                        return_value="Pike is working from the live pane.",
+                    ) as summarize:
+                        with mock.patch.object(app, "dispatch_tmux_summary_webhook") as dispatch:
+                            with mock.patch.object(app, "send_text_to_tmux_target") as sent:
+                                result = app.route_api_local_summary(
+                                    config,
+                                    "Pike",
+                                    "progress_summary",
+                                    commands,
+                                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["source"], "tmux_capture")
+        self.assertEqual(
+            result["detail_lines"],
+            ["latest live line", "newest live line"],
+        )
+        summarize.assert_called_once_with(
+            config,
+            "Pike",
+            "",
+            ["latest live line", "newest live line"],
+        )
+        self.assertIn("capture-pane", run.call_args.args[0])
+        dispatch.assert_not_called()
         sent.assert_not_called()
 
     def test_post_tmux_summary_webhook_sends_json_payload(self):

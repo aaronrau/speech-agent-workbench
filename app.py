@@ -4797,6 +4797,130 @@ def summarize_tmux_agent_output(config, agent_label, command_text, lines):
     return clean_one_sentence_summary(summary)
 
 
+def configured_tmux_summary_line_limit(config):
+    return get_config_int(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_LINES",
+        "auto_tmux_summary_lines",
+        DEFAULT_CONFIG["auto_tmux_summary_lines"],
+        minimum=1,
+    )
+
+
+def configured_tmux_summary_max_chars(config):
+    return get_config_int(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_MAX_CHARS",
+        "auto_tmux_summary_max_chars",
+        DEFAULT_CONFIG["auto_tmux_summary_max_chars"],
+        minimum=200,
+    )
+
+
+def cap_tmux_summary_input_lines(lines, max_chars):
+    summary_input_lines = list(lines or [])
+    while (
+        max_chars > 0
+        and len("\n".join(summary_input_lines)) > max_chars
+        and len(summary_input_lines) > 1
+    ):
+        summary_input_lines.pop(0)
+    return summary_input_lines
+
+
+def read_tmux_console_agent_lines(config, agent_label):
+    path = get_auto_tmux_console_log_path(config)
+    if not path:
+        return None, "tmux_console_log_unconfigured"
+
+    target_key = normalize_tmux_agent_key(agent_label)
+    if not target_key:
+        return None, "missing_agent"
+
+    lines = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for raw_line in handle:
+                _timestamp, payload = split_tmux_console_log_record(raw_line)
+                if not payload:
+                    continue
+                label, agent_payload = extract_tmux_console_agent_payload(payload)
+                if normalize_tmux_agent_key(label) != target_key:
+                    continue
+                lines.extend(tmux_console_payload_to_lines(agent_payload))
+    except FileNotFoundError:
+        return None, "tmux_console_log_missing"
+    except OSError as exc:
+        print(f"[api] unable to read tmux console log: {exc}", file=sys.stderr)
+        return None, "tmux_console_log_unreadable"
+
+    summary_lines = configured_tmux_summary_line_limit(config)
+    trim_tmux_agent_lines(lines, summary_lines)
+    return cap_tmux_summary_input_lines(
+        lines[-summary_lines:],
+        configured_tmux_summary_max_chars(config),
+    ), None
+
+
+def capture_tmux_target_lines(config, command):
+    target = str(command.get("tmux_send_target") or "").strip()
+    if not target:
+        return None, "tmux_capture_target_missing"
+    if not shutil.which("tmux"):
+        return None, "tmux_not_found"
+
+    summary_lines = configured_tmux_summary_line_limit(config)
+    try:
+        result = run_command(
+            [
+                "tmux",
+                "capture-pane",
+                "-p",
+                "-t",
+                target,
+                "-S",
+                f"-{summary_lines}",
+            ],
+            timeout=1.0,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "tmux_capture_timeout"
+    except OSError as exc:
+        print(f"[api] unable to capture tmux pane: {exc}", file=sys.stderr)
+        return None, "tmux_capture_unavailable"
+
+    if result.returncode != 0:
+        detail = summarize_log_text(result.stderr or result.stdout)
+        if detail:
+            print(f"[api] tmux capture failed for {target}: {detail}", file=sys.stderr)
+        return None, "tmux_capture_failed"
+
+    lines = tmux_console_payload_to_lines(result.stdout)
+    trim_tmux_agent_lines(lines, summary_lines)
+    return cap_tmux_summary_input_lines(
+        lines[-summary_lines:],
+        configured_tmux_summary_max_chars(config),
+    ), None
+
+
+def read_tmux_agent_tail_lines(config, command, agent_label):
+    lines, error = capture_tmux_target_lines(config, command)
+    if lines:
+        return lines, None, "tmux_capture"
+
+    if error not in (
+        "tmux_capture_target_missing",
+        "tmux_not_found",
+        "tmux_capture_failed",
+        "tmux_capture_timeout",
+        "tmux_capture_unavailable",
+    ):
+        return None, error, "tmux_capture"
+
+    lines, log_error = read_tmux_console_agent_lines(config, agent_label)
+    return lines, log_error, "tmux_console_log"
+
+
 def print_tmux_summary(agent_label, command_text, summary):
     label = agent_label or "tmux"
     command = str(command_text or "").strip() or "unknown"
@@ -5141,30 +5265,59 @@ def parse_agent_prefixed_message(text):
     return agent, body
 
 
-def parse_api_message_payload(body, content_type="application/json"):
+def normalize_api_message_type(value):
+    message_type = str(value or "tmux").strip().lower().replace("-", "_")
+    if not message_type:
+        return "tmux"
+    if message_type in ("tmux", "command", "send"):
+        return "tmux"
+    if message_type == "local":
+        return "local"
+    return ""
+
+
+def parse_api_message_request(body, content_type="application/json"):
     content_type = str(content_type or "").split(";", 1)[0].strip().lower()
     text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body or "")
     if content_type == "application/json" or text.lstrip().startswith("{"):
         try:
             payload = json.loads(text or "{}")
         except json.JSONDecodeError as exc:
-            return None, None, f"invalid_json: {exc}"
+            return None, f"invalid_json: {exc}"
         if not isinstance(payload, dict):
-            return None, None, "invalid_payload"
+            return None, "invalid_payload"
+        message_type = normalize_api_message_type(
+            payload.get("type") or payload.get("message_type") or payload.get("mode")
+        )
+        if not message_type:
+            return None, "invalid_message_type"
         agent = str(payload.get("agent") or "").strip()
         message = str(payload.get("message") or payload.get("text") or "").strip()
+        if message_type == "local" and agent and not message:
+            message = "progress_summary"
         if agent and message:
-            return agent, message, None
+            return {"type": message_type, "agent": agent, "message": message}, None
         if message:
             agent, body_text = parse_agent_prefixed_message(message)
             if agent and body_text:
-                return agent, body_text, None
-        return None, None, "missing_message"
+                return {
+                    "type": message_type,
+                    "agent": agent,
+                    "message": body_text,
+                }, None
+        return None, "missing_message"
 
     agent, body_text = parse_agent_prefixed_message(text)
     if not agent or not body_text:
-        return None, None, "missing_agent_prefix"
-    return agent, body_text, None
+        return None, "missing_agent_prefix"
+    return {"type": "tmux", "agent": agent, "message": body_text}, None
+
+
+def parse_api_message_payload(body, content_type="application/json"):
+    request, error = parse_api_message_request(body, content_type)
+    if error:
+        return None, None, error
+    return request["agent"], request["message"], None
 
 
 def build_api_agent_command_index(commands):
@@ -5272,6 +5425,89 @@ def route_api_message_to_tmux(agent, message, commands):
         "focused": bool(focused),
         "message": body,
         "sent": bool(sent),
+    }
+
+
+def route_api_local_summary(config, agent, message, commands):
+    index, available = build_api_agent_command_index(commands)
+    key = normalize_voice_command_text(agent)
+    command = index.get(key)
+    if command is None:
+        print(
+            f"[api] rejected local summary for unknown agent '{str(agent or '').strip()}'; "
+            f"available: {', '.join(available) if available else 'none'}",
+            flush=True,
+        )
+        return {
+            "ok": False,
+            "error": "unknown_agent",
+            "agent": str(agent or ""),
+            "available_agents": available,
+            "sent": False,
+            "type": "local",
+        }
+
+    agent_label = command.get("label") or agent
+    lines, error, source = read_tmux_agent_tail_lines(config, command, agent_label)
+    if error:
+        print(
+            f"[api] local summary unavailable for {agent_label}: {error}",
+            flush=True,
+        )
+        return {
+            "ok": False,
+            "error": error,
+            "agent": agent_label,
+            "sent": False,
+            "type": "local",
+        }
+    if not lines:
+        return {
+            "ok": False,
+            "error": "no_tmux_output",
+            "agent": agent_label,
+            "sent": False,
+            "type": "local",
+        }
+
+    detail_lines = format_tmux_summary_detail_lines(lines)
+    if not detail_lines:
+        return {
+            "ok": False,
+            "error": "no_tmux_output",
+            "agent": agent_label,
+            "sent": False,
+            "type": "local",
+        }
+
+    command_record = get_tmux_sent_command(
+        agent_label,
+        command.get("tmux_send_target"),
+    )
+    command_text = command_record.get("text") if command_record else ""
+    summary = summarize_tmux_agent_output(
+        config,
+        agent_label,
+        command_text,
+        detail_lines,
+    )
+    print_tmux_summary(agent_label, command_text, summary)
+    print(
+        f"[api] summarized local tmux output for {agent_label} "
+        f"({len(lines)} lines from {source})",
+        flush=True,
+    )
+    return {
+        "ok": True,
+        "agent": agent_label,
+        "detail": format_tmux_summary_detail(detail_lines),
+        "detail_lines": detail_lines,
+        "detail_line_count": len(detail_lines),
+        "message": str(message or "progress_summary"),
+        "sent": False,
+        "source": source,
+        "summary": summary,
+        "type": "local",
     }
 
 
@@ -5392,14 +5628,26 @@ def make_voice_api_handler(config, commands):
                 self.send_json(400, {"ok": False, "error": "invalid_body_size"})
                 return
             body = self.rfile.read(length)
-            agent, message, error = parse_api_message_payload(
+            request, error = parse_api_message_request(
                 body,
                 self.headers.get("Content-Type", ""),
             )
             if error:
                 self.send_json(400, {"ok": False, "error": error})
                 return
-            result = route_api_message_to_tmux(agent, message, commands)
+            if request["type"] == "local":
+                result = route_api_local_summary(
+                    config,
+                    request["agent"],
+                    request["message"],
+                    commands,
+                )
+            else:
+                result = route_api_message_to_tmux(
+                    request["agent"],
+                    request["message"],
+                    commands,
+                )
             self.send_json(200 if result.get("ok") else 400, result)
 
     return VoiceApiHandler
