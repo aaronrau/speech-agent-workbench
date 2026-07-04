@@ -229,7 +229,9 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
 
     def test_apply_runtime_cli_flags_sets_disable_stt(self):
         with mock.patch.dict("os.environ", {}, clear=True):
-            remaining = app.apply_runtime_cli_flags(["--disable-stt", "--other"])
+            remaining = app.apply_runtime_cli_flags(
+                ["--disable-stt", "--", "stt-disable", "--other"]
+            )
 
             self.assertEqual(remaining, ["--other"])
             self.assertEqual(os.environ["VOICE_DISABLE_STT"], "1")

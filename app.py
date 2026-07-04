@@ -6893,7 +6893,9 @@ def apply_runtime_cli_flags(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     remaining = []
     for arg in argv:
-        if arg == "--disable-stt":
+        if arg == "--":
+            continue
+        if arg in ("--disable-stt", "--stt-disable", "disable-stt", "stt-disable"):
             os.environ["VOICE_DISABLE_STT"] = "1"
         else:
             remaining.append(arg)

@@ -61,7 +61,9 @@ fi
 args=()
 for arg in "$@"; do
   case "$arg" in
-    --disable-stt)
+    --)
+      ;;
+    --disable-stt|--stt-disable|disable-stt|stt-disable)
       export VOICE_DISABLE_STT=1
       ;;
     *)
