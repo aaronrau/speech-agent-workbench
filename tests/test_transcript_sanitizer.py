@@ -850,6 +850,25 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(commands["agent too"]["tmux_send_target"], "%12")
         self.assertEqual(commands["agent 2"]["tmux_send_target"], "%12")
 
+    def test_auto_tmux_switch_commands_include_clear_terminal_commands(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "VOICE_AUTO_TMUX_SESSION": "speech-agent-workbench",
+                "VOICE_AUTO_TMUX_SWITCHES": "agent two=pane:%12",
+            },
+            clear=True,
+        ):
+            commands = build_auto_tmux_switch_commands({})
+
+        command = commands["agent two clear terminal"]
+        self.assertEqual(command["argv"], ["tmux", "select-pane", "-t", "%12"])
+        self.assertEqual(command["tmux_send_target"], "%12")
+        self.assertEqual(command["tmux_send_text"], "/clear")
+        self.assertFalse(command["allow_prefix"])
+        self.assertEqual(commands["agent to clear terminal"], command)
+        self.assertEqual(commands["agent two clear the terminal"], command)
+
     def test_build_command_text_aliases_includes_codex_homophones(self):
         self.assertIn("code x", build_command_text_aliases("codex"))
         self.assertIn("condex", build_command_text_aliases("codex"))
@@ -1333,6 +1352,38 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             commands["wolf terminate session"],
         )
 
+    def test_clear_terminal_command_beats_shorter_prefix_command(self):
+        commands = {
+            "agent two": {
+                "label": "agent two",
+                "argv": ["tmux", "select-pane"],
+            },
+            "agent two clear terminal": {
+                "label": "agent two clear terminal",
+                "argv": ["tmux", "select-pane"],
+                "tmux_send_text": "/clear",
+                "allow_prefix": False,
+            },
+        }
+
+        self.assertIsNone(
+            match_auto_shell_command_prefix("Agent two clear terminal", commands)
+        )
+        self.assertIsNone(
+            match_auto_shell_command_prefix(
+                "Agent two clear terminal please",
+                commands,
+            )
+        )
+        self.assertEqual(
+            match_auto_shell_command("Agent two clear terminal", commands),
+            commands["agent two clear terminal"],
+        )
+        self.assertEqual(
+            match_auto_shell_command("Agent two clear terminal please", commands),
+            commands["agent two clear terminal"],
+        )
+
     def test_match_auto_shell_command_prefix_accepts_target_and_message(self):
         commands = {"agent two": {"label": "agent two", "argv": ["tmux"]}}
 
@@ -1495,6 +1546,30 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 ["tmux", "send-keys", "-t", "%1", "C-m"],
             ],
         )
+
+    def test_run_auto_shell_command_sends_preconfigured_tmux_text(self):
+        command = {
+            "label": "agent two clear terminal",
+            "argv": ["tmux", "select-pane", "-t", "%1"],
+            "tmux_send_target": "%1",
+            "tmux_send_text": "/clear",
+        }
+
+        with mock.patch.object(app, "focus_auto_terminal_window", return_value=True):
+            with mock.patch.object(
+                app,
+                "run_command",
+                return_value=mock.Mock(returncode=0, stdout="", stderr=""),
+            ) as run:
+                with mock.patch.object(
+                    app,
+                    "send_text_to_tmux_target",
+                    return_value=True,
+                ) as send:
+                    self.assertTrue(app.run_auto_shell_command(command))
+
+        run.assert_called_once_with(command["argv"], timeout=2.0)
+        send.assert_called_once_with(command, "/clear")
 
     def test_append_transcript_history_appends_successful_text(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

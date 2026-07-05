@@ -13,6 +13,7 @@ it as a fun local script for trying ideas quickly.
 - Plain dictation mode that types text into the focused app after a trigger word.
 - Agent workbench mode that starts a tmux workspace with three configurable agent panes and one voice listener pane.
 - Voice routing by pane/window name: say `<agent name>` to switch targets or `<agent name> <message>` to send text directly to that tmux target and press Enter.
+- Per-agent clear command: say `<agent name> clear terminal` to send `/clear` to that agent's tmux terminal.
 - Configurable agent names, working directories, pane/window layout, voice pane name, trigger word, aliases, paste mode, and input devices.
 - Numeric pane names get spoken-number aliases, so a name containing `2` can be addressed as `two`.
 - Optional voice session shutdown commands, disabled by default.
@@ -105,6 +106,13 @@ The console also logs the raw STT text, pre-LLM cleanup text, llama.cpp output,
 and final accepted text by default. Set
 `VOICE_TRANSCRIPT_CORRECTION_CONSOLE_LOG=0` or
 `"transcript_correction_console_log": false` to disable that console output.
+
+### Clear Terminal Command
+
+Every configured tmux switch target also gets an exact clear command. Say
+`<agent name> clear terminal` and the workbench focuses that target, sends
+`/clear`, and presses Enter. The clear phrase is not treated as a normal
+agent-prefixed prompt message.
 
 ### Optional Terminate Command
 

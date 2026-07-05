@@ -376,6 +376,20 @@ def build_terminate_command_text_aliases(command_text):
     return sorted(aliases, key=lambda value: (-len(value.split()), value))
 
 
+def build_clear_terminal_command_text_aliases(command_text):
+    aliases = set()
+    suffixes = (
+        "clear terminal",
+        "clear the terminal",
+        "clear terminals",
+        "clear the terminals",
+    )
+    for alias in build_command_text_aliases(command_text):
+        for suffix in suffixes:
+            aliases.add(f"{alias} {suffix}")
+    return sorted(aliases, key=lambda value: (-len(value.split()), value))
+
+
 def strip_voice_attention_words(words):
     attention_words = {"hey", "hi", "ok", "okay", "please"}
     index = 0
@@ -486,6 +500,16 @@ def build_auto_tmux_switch_commands(config):
         }
         for alias in build_command_text_aliases(normalized):
             commands.setdefault(alias, command)
+        clear_command = {
+            "label": f"{spoken_name} clear terminal",
+            "argv": argv,
+            "tmux_send_target": tmux_send_target,
+            "tmux_send_text": "/clear",
+            "success_message": f"[auto] cleared terminal for {spoken_name}.",
+            "allow_prefix": False,
+        }
+        for alias in build_clear_terminal_command_text_aliases(normalized):
+            commands.setdefault(alias, clear_command)
 
     if terminate_commands_enabled(config):
         terminate_value = os.environ.get("VOICE_AUTO_TMUX_TERMINATE_WORDS")
@@ -606,6 +630,11 @@ def match_auto_shell_command_prefix(text, commands):
     spoken_tokens, start_index = strip_voice_attention_words(spoken_tokens)
     phrase = " ".join(spoken_tokens)
     if phrase in commands and commands[phrase].get("allow_prefix") is False:
+        return None
+    if match_exact_only_auto_shell_command_with_filler(
+        spoken_tokens,
+        commands,
+    ) is not None:
         return None
 
     matches = []
@@ -6787,6 +6816,10 @@ def run_auto_shell_command(command):
         returncode=result.returncode,
         success=True,
     )
+    tmux_send_text = command.get("tmux_send_text")
+    if tmux_send_text is not None:
+        if not send_text_to_tmux_target(command, tmux_send_text):
+            return False
     message = command.get("success_message")
     if message:
         print(message)
