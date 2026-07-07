@@ -384,6 +384,63 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         run.assert_called_once_with(commands["flux clear terminal"])
         sent.assert_not_called()
 
+    def test_route_api_message_to_tmux_uses_llm_for_clear_session_control(self):
+        commands = {
+            "flux": {
+                "label": "flux",
+                "tmux_send_target": "%1",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+            },
+            "flux clear terminal": {
+                "label": "flux clear terminal",
+                "tmux_send_target": "%1",
+                "tmux_send_text": "/clear",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+                "allow_prefix": False,
+            },
+        }
+        config = {
+            "transcript_correction_backend": "llama.cpp",
+            "transcript_correction_console_log": False,
+        }
+        correction = {
+            "raw_transcript": "Flux Clear Session.",
+            "pre_llm_transcript": "Flux Clear Session.",
+            "corrected_transcript": "Flux clear terminal",
+            "correction_backend": "llama-cpp",
+            "model_skipped": False,
+        }
+
+        with mock.patch.object(
+            app,
+            "correct_transcript_details",
+            return_value=correction,
+        ) as correct:
+            with mock.patch.object(
+                app,
+                "run_auto_shell_command",
+                return_value=True,
+            ) as run:
+                with mock.patch.object(app, "send_text_to_tmux_target") as sent:
+                    result = app.route_api_message_to_tmux(
+                        "Flux",
+                        "Clear Session.",
+                        commands,
+                        config,
+                    )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["control"])
+        self.assertEqual(result["agent"], "flux")
+        self.assertFalse(result["sent"])
+        correct.assert_called_once()
+        self.assertEqual(
+            correct.call_args.kwargs["command_labels"],
+            ["flux", "flux clear terminal"],
+        )
+        run.assert_called_once_with(commands["flux clear terminal"])
+        sent.assert_not_called()
+
     def test_route_api_local_summary_reads_agent_log_without_tmux_send(self):
         commands = {
             "flux": {
@@ -969,6 +1026,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             "decide whether the raw phrase is asking to clear",
             system_prompt,
         )
+        self.assertIn("treat clear session as a clear-terminal intent", system_prompt)
         self.assertIn("if yes, rewrite", system_prompt)
         self.assertIn("if no, leave", system_prompt)
         self.assertNotIn("do not add clear terminal", system_prompt)

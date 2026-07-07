@@ -3683,8 +3683,10 @@ def build_transcript_correction_messages(text, command_labels, config):
         "similarity is clear; do not invent unavailable commands. For an "
         "available command ending in 'clear terminal', decide whether the raw "
         "transcript is asking to clear that target's terminal, session, or "
-        "screen. If yes, rewrite to that exact available clear-terminal "
-        "command. If no, leave the user's wording intact.\n"
+        "screen. Treat 'clear session' as a clear-terminal intent when the "
+        "target has an available clear-terminal command. If yes, rewrite to "
+        "that exact available clear-terminal command. If no, leave the user's "
+        "wording intact.\n"
         f"Raw transcript: {text}\n"
         "Corrected transcript:"
     )
@@ -5371,7 +5373,34 @@ def build_api_agent_command_index(commands):
     return index, available
 
 
-def route_api_message_to_tmux(agent, message, commands):
+def get_api_control_correction_max_words(config):
+    return get_config_int(
+        config or {},
+        "VOICE_API_CONTROL_CORRECTION_MAX_WORDS",
+        "api_control_correction_max_words",
+        8,
+        minimum=0,
+    )
+
+
+def maybe_correct_api_control_text(config, control_text, available):
+    if not config:
+        return control_text, None
+    max_words = get_api_control_correction_max_words(config)
+    if max_words <= 0:
+        return control_text, None
+    if len(normalize_voice_command_text(control_text).split()) > max_words:
+        return control_text, None
+    details = correct_transcript_details(
+        control_text,
+        config,
+        command_labels=available,
+    )
+    corrected = str(details.get("corrected_transcript") or "").strip()
+    return corrected or control_text, details
+
+
+def route_api_message_to_tmux(agent, message, commands, config=None):
     index, available = build_api_agent_command_index(commands)
     key = normalize_voice_command_text(agent)
     command = index.get(key)
@@ -5401,12 +5430,27 @@ def route_api_message_to_tmux(agent, message, commands):
         }
     control_text = f"{str(agent or '').strip()} {body}".strip()
     control_command = safe_match_auto_shell_command(control_text, commands)
+    correction = None
+    if control_command is None:
+        corrected_control_text, correction = maybe_correct_api_control_text(
+            config,
+            control_text,
+            available,
+        )
+        if normalize_voice_command_text(
+            corrected_control_text
+        ) != normalize_voice_command_text(control_text):
+            control_command = safe_match_auto_shell_command(
+                corrected_control_text,
+                commands,
+            )
     if control_command is not None and control_command is not command:
-        correction = {
-            "raw_transcript": control_text,
-            "pre_llm_transcript": control_text,
-            "corrected_transcript": control_text,
-        }
+        if correction is None:
+            correction = {
+                "raw_transcript": control_text,
+                "pre_llm_transcript": control_text,
+                "corrected_transcript": control_text,
+            }
         if not auto_shell_command_allowed(control_command, correction):
             return {
                 "ok": False,
@@ -5677,6 +5721,7 @@ def make_voice_api_handler(config, commands):
                     request["agent"],
                     request["message"],
                     commands,
+                    config,
                 )
             self.send_json(200 if result.get("ok") else 400, result)
 
