@@ -5401,7 +5401,7 @@ def route_api_message_to_tmux(agent, message, commands):
         }
     control_text = f"{str(agent or '').strip()} {body}".strip()
     control_command = safe_match_auto_shell_command(control_text, commands)
-    if control_command is not None and not control_command.get("tmux_send_target"):
+    if control_command is not None and control_command is not command:
         correction = {
             "raw_transcript": control_text,
             "pre_llm_transcript": control_text,

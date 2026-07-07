@@ -353,6 +353,37 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         run.assert_called_once_with(commands["wolf terminate session"])
         sent.assert_not_called()
 
+    def test_route_api_message_to_tmux_runs_targeted_clear_control_command(self):
+        commands = {
+            "flux": {
+                "label": "flux",
+                "tmux_send_target": "%1",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+            },
+            "flux clear terminal": {
+                "label": "flux clear terminal",
+                "tmux_send_target": "%1",
+                "tmux_send_text": "/clear",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+                "allow_prefix": False,
+            },
+        }
+
+        with mock.patch.object(app, "run_auto_shell_command", return_value=True) as run:
+            with mock.patch.object(app, "send_text_to_tmux_target") as sent:
+                result = app.route_api_message_to_tmux(
+                    "Flux",
+                    "Clear Terminal.",
+                    commands,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["control"])
+        self.assertEqual(result["agent"], "flux")
+        self.assertFalse(result["sent"])
+        run.assert_called_once_with(commands["flux clear terminal"])
+        sent.assert_not_called()
+
     def test_route_api_local_summary_reads_agent_log_without_tmux_send(self):
         commands = {
             "flux": {
