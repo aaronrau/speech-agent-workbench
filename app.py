@@ -378,15 +378,8 @@ def build_terminate_command_text_aliases(command_text):
 
 def build_clear_terminal_command_text_aliases(command_text):
     aliases = set()
-    suffixes = (
-        "clear terminal",
-        "clear the terminal",
-        "clear terminals",
-        "clear the terminals",
-    )
     for alias in build_command_text_aliases(command_text):
-        for suffix in suffixes:
-            aliases.add(f"{alias} {suffix}")
+        aliases.add(f"{alias} clear terminal")
     return sorted(aliases, key=lambda value: (-len(value.split()), value))
 
 
@@ -3683,7 +3676,15 @@ def build_transcript_correction_messages(text, command_labels, config):
     labels = sorted({str(label).strip() for label in command_labels or [] if label})
     target_text = ", ".join(labels[:24]) if labels else "none"
     user_prompt = (
-        f"Available spoken routing targets: {target_text}\n"
+        f"Available spoken commands and routing targets: {target_text}\n"
+        "Treat these as the allowed canonical spellings. If the raw transcript "
+        "sounds phonetically similar to one available command or target, "
+        "rewrite it to that closest exact phrase. Only do this when the "
+        "similarity is clear; do not invent unavailable commands. For an "
+        "available command ending in 'clear terminal', decide whether the raw "
+        "transcript is asking to clear that target's terminal, session, or "
+        "screen. If yes, rewrite to that exact available clear-terminal "
+        "command. If no, leave the user's wording intact.\n"
         f"Raw transcript: {text}\n"
         "Corrected transcript:"
     )

@@ -867,7 +867,8 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(command["tmux_send_text"], "/clear")
         self.assertFalse(command["allow_prefix"])
         self.assertEqual(commands["agent to clear terminal"], command)
-        self.assertEqual(commands["agent two clear the terminal"], command)
+        self.assertNotIn("agent two clear the terminal", commands)
+        self.assertNotIn("agent two clear session", commands)
 
     def test_build_command_text_aliases_includes_codex_homophones(self):
         self.assertIn("code x", build_command_text_aliases("codex"))
@@ -916,11 +917,51 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertIn("evalues", prompt)
         self.assertIn("write evals", prompt)
 
+    def test_transcript_correction_prompt_lists_spoken_commands(self):
+        messages = build_transcript_correction_messages(
+            "Agent two cleire terminal",
+            ["agent two", "agent two clear terminal"],
+            {
+                "transcript_correction_prompt": (
+                    load_example_transcript_correction_prompt()
+                )
+            },
+        )
+
+        system_prompt = messages[0]["content"].lower()
+        user_prompt = messages[1]["content"].lower()
+        self.assertIn(
+            "full raw phrase sounds similar to an available spoken command",
+            system_prompt,
+        )
+        self.assertIn(
+            "decide whether the raw phrase is asking to clear",
+            system_prompt,
+        )
+        self.assertIn("if yes, rewrite", system_prompt)
+        self.assertIn("if no, leave", system_prompt)
+        self.assertNotIn("do not add clear terminal", system_prompt)
+        self.assertIn("do not add terminate", system_prompt)
+        self.assertIn("available spoken commands and routing targets", user_prompt)
+        self.assertIn("agent two clear terminal", user_prompt)
+        self.assertIn("sounds phonetically similar", user_prompt)
+        self.assertIn("closest exact phrase", user_prompt)
+        self.assertIn("clear-terminal command", user_prompt)
+
     def test_correct_common_coding_terms_fixes_codex_and_tmux(self):
         self.assertEqual(
             correct_common_coding_terms("ask condex to inspect tea mux"),
             "ask Codex to inspect tmux",
         )
+
+    def test_correct_common_coding_terms_does_not_hardcode_clear_variants(self):
+        for text in (
+            "Agent two Claire terminal",
+            "Agent two clear session",
+            "Agent two clear the terminal",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(correct_common_coding_terms(text), text)
 
     def test_correct_common_coding_terms_fixes_langfuse_homophones(self):
         self.assertEqual(
@@ -1036,6 +1077,39 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         )
         server.assert_called_once()
         run.assert_not_called()
+
+    def test_correct_transcript_text_lets_llm_fix_clear_terminal_variants(self):
+        config = {
+            "transcript_correction_backend": "llama.cpp",
+            "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
+            "transcript_correction_max_new_tokens": 32,
+            "transcript_correction_console_log": False,
+        }
+
+        for raw_text in (
+            "Agent two Claire terminal",
+            "Agent two clear session",
+            "Agent two clear the terminal",
+        ):
+            with self.subTest(raw_text=raw_text):
+                app.TRANSCRIPT_CORRECTION_FAILURES.clear()
+                with mock.patch.object(
+                    app,
+                    "correct_transcript_with_llama_cpp_server",
+                    return_value="Agent two clear terminal",
+                ) as server:
+                    result = correct_transcript_text(
+                        raw_text,
+                        config,
+                        command_labels=["agent two", "agent two clear terminal"],
+                    )
+
+                self.assertEqual(result, "Agent two clear terminal")
+                server.assert_called_once()
+                self.assertEqual(
+                    server.call_args.kwargs["command_labels"],
+                    ["agent two", "agent two clear terminal"],
+                )
 
     def test_correct_transcript_details_records_raw_and_corrected_text(self):
         config = {
