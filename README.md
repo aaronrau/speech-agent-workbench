@@ -199,7 +199,9 @@ When Agent Audio Pipe supplies ASR, `--disable-stt` is the intended mode. Keep
 `auto_enable_terminate_commands` set to `false` when the `/messages` API should
 remain continuously available. If termination commands are enabled,
 `Wolf terminate session` kills the workbench and the API listener on port
-`8787`; callers will fail until `run-auto.sh` is started again.
+`8787`; the terminating request may receive an empty HTTP response because the
+server stops before it can reply. Later callers will fail until `run-auto.sh` is
+started again.
 
 For a persistent Agent Audio Pipe setup, copy the tracked environment template
 once and then use the normal launcher:

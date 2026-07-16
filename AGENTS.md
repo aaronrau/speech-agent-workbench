@@ -43,4 +43,6 @@ Do not commit `config.json`, virtualenvs, generated audio, local model caches, p
   session, and keeps the auto/agent console logs under the runtime directory.
 - Keep `auto_enable_terminate_commands` disabled for a persistent API. An
   enabled terminate phrase kills the tmux session and the API listener on port
-  `8787`, causing callers to receive connection failures until restart.
+  `8787`. The terminating request may receive an empty response because the
+  server stops before replying, and later callers receive connection failures
+  until restart.

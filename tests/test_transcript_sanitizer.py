@@ -1200,6 +1200,76 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                     ["agent two", "agent two clear terminal"],
                 )
 
+    def test_correct_transcript_text_never_rewrites_terminate_as_clear(self):
+        config = {
+            "transcript_correction_backend": "llama.cpp",
+            "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
+            "transcript_correction_max_new_tokens": 32,
+            "transcript_correction_console_log": False,
+        }
+
+        app.TRANSCRIPT_CORRECTION_FAILURES.clear()
+        with mock.patch.object(
+            app,
+            "correct_transcript_with_llama_cpp_server",
+            return_value="wolf clear terminal",
+        ):
+            details = correct_transcript_details(
+                "Wolf Terminate session",
+                config,
+                command_labels=["wolf", "wolf clear terminal"],
+            )
+
+        self.assertEqual(details["corrected_transcript"], "Wolf Terminate session")
+        self.assertFalse(details["model_accepted"])
+        self.assertEqual(details["fallback_reason"], "implausible_model_output")
+
+    def test_correct_transcript_text_never_drops_terminate_intent(self):
+        config = {
+            "transcript_correction_backend": "llama.cpp",
+            "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
+            "transcript_correction_max_new_tokens": 32,
+            "transcript_correction_console_log": False,
+        }
+
+        app.TRANSCRIPT_CORRECTION_FAILURES.clear()
+        with mock.patch.object(
+            app,
+            "correct_transcript_with_llama_cpp_server",
+            return_value="wolf open terminal",
+        ):
+            details = correct_transcript_details(
+                "Wolf Terminate session",
+                config,
+                command_labels=["wolf", "wolf terminate session"],
+            )
+
+        self.assertEqual(details["corrected_transcript"], "Wolf Terminate session")
+        self.assertFalse(details["model_accepted"])
+
+    def test_correct_transcript_text_never_invents_terminate_command(self):
+        config = {
+            "transcript_correction_backend": "llama.cpp",
+            "transcript_correction_llama_cpp_model": "/tmp/model.gguf",
+            "transcript_correction_max_new_tokens": 32,
+            "transcript_correction_console_log": False,
+        }
+
+        app.TRANSCRIPT_CORRECTION_FAILURES.clear()
+        with mock.patch.object(
+            app,
+            "correct_transcript_with_llama_cpp_server",
+            return_value="wolf terminate session",
+        ):
+            details = correct_transcript_details(
+                "Wolf clear session",
+                config,
+                command_labels=["wolf", "wolf terminate session"],
+            )
+
+        self.assertEqual(details["corrected_transcript"], "Wolf clear session")
+        self.assertFalse(details["model_accepted"])
+
     def test_correct_transcript_details_records_raw_and_corrected_text(self):
         config = {
             "transcript_correction_backend": "llama.cpp",

@@ -3680,7 +3680,10 @@ def build_transcript_correction_messages(text, command_labels, config):
         "Treat these as the allowed canonical spellings. If the raw transcript "
         "sounds phonetically similar to one available command or target, "
         "rewrite it to that closest exact phrase. Only do this when the "
-        "similarity is clear; do not invent unavailable commands. For an "
+        "similarity is clear; do not invent unavailable commands. A raw "
+        "transcript containing terminate, terminates, or terminating is never "
+        "a clear intent. Preserve that termination wording and never rewrite "
+        "it to a clear command. For an "
         "available command ending in 'clear terminal', decide whether the raw "
         "transcript is asking to clear that target's terminal, session, or "
         "screen. Treat 'clear session' as a clear-terminal intent when the "
@@ -4001,6 +4004,16 @@ def corrected_transcript_is_plausible(raw_text, corrected_text):
         return False
     raw_words = set(normalize_transcript_for_filter(raw).split())
     corrected_words = set(normalize_transcript_for_filter(corrected).split())
+    raw_has_terminate = any(word.startswith("terminat") for word in raw_words)
+    corrected_has_terminate = any(
+        word.startswith("terminat") for word in corrected_words
+    )
+    if raw_has_terminate and (
+        not corrected_has_terminate or "clear" in corrected_words
+    ):
+        return False
+    if not raw_has_terminate and corrected_has_terminate:
+        return False
     if (
         len(raw_words) >= 3
         and corrected_words
