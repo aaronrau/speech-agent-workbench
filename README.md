@@ -235,6 +235,9 @@ the microphone:
 VOICE_API_ENABLED=1 VOICE_API_TOKEN=local-secret ./run-auto.sh
 ```
 
+`run-auto.sh` also loads local defaults from `.env` when that file exists.
+Values supplied explicitly in the shell take precedence over `.env` values.
+
 Send an agent-prefixed message with JSON:
 
 ```bash

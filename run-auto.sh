@@ -3,6 +3,34 @@ set -euo pipefail
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+load_local_env() {
+  local env_file="$ROOT/.env"
+  [[ -f "$env_file" ]] || return 0
+
+  local key
+  local -A existing_values=()
+  while IFS= read -r key; do
+    if [[ -v "$key" ]]; then
+      existing_values["$key"]="${!key}"
+    fi
+  done < <(
+    sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p' "$env_file"
+  )
+
+  set -a
+  # shellcheck disable=SC1091
+  source "$env_file"
+  set +a
+
+  for key in "${!existing_values[@]}"; do
+    printf -v "$key" '%s' "${existing_values[$key]}"
+    export "$key"
+  done
+}
+
+load_local_env
+
 CONFIG_PATH="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
 export VOICE_HOTKEY_CONFIG="$CONFIG_PATH"
 VAD_MODEL="${VOICE_AUTO_SHERPA_VAD_MODEL:-$ROOT/models/silero_vad.onnx}"
