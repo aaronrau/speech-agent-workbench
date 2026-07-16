@@ -201,6 +201,21 @@ remain continuously available. If termination commands are enabled,
 `Wolf terminate session` kills the workbench and the API listener on port
 `8787`; callers will fail until `run-auto.sh` is started again.
 
+For a persistent Agent Audio Pipe setup, copy the tracked environment template
+once and then use the normal launcher:
+
+```bash
+cp .env.agent-audio-pipe.example .env
+./run-auto.sh
+```
+
+The template disables duplicate STT probing, fixes the tmux target to
+`speech-workbench`, keeps Wolf in the same pane-based session, and sends the
+Wolf and agent-pane output to `speech-agent-workbench-auto.log` and
+`speech-agent-workbench-console.log` under `${XDG_RUNTIME_DIR:-/tmp}`. Update
+the two example tokens if the Agent Audio Pipe configuration uses different
+values.
+
 On interactive launch, the workbench script shows the saved agent command, pane names, and paths. Accept the defaults or update them. The values are saved in `config.json`.
 When launched through `./run-auto.sh`, model downloads and enabled
 transcript-correction assets are checked in the foreground before tmux starts so
@@ -243,6 +258,8 @@ VOICE_API_ENABLED=1 VOICE_API_TOKEN=local-secret ./run-auto.sh
 
 `run-auto.sh` also loads local defaults from `.env` when that file exists.
 Values supplied explicitly in the shell take precedence over `.env` values.
+For Agent Audio Pipe, start from `.env.agent-audio-pipe.example` so a bare
+`./run-auto.sh` does not probe the unused remote STT endpoint on port `8765`.
 
 Send an agent-prefixed message with JSON:
 

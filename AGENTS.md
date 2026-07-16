@@ -38,6 +38,9 @@ Do not commit `config.json`, virtualenvs, generated audio, local model caches, p
 - For glasses-provided ASR, start this workbench with
   `./run-auto.sh --disable-stt` and keep the API token, API port, agent names,
   summary webhook URL, and summary token aligned with Agent Audio Pipe.
+- Prefer copying `.env.agent-audio-pipe.example` to the ignored `.env` for a
+  persistent local integration. The template keeps STT disabled, pins the tmux
+  session, and keeps the auto/agent console logs under the runtime directory.
 - Keep `auto_enable_terminate_commands` disabled for a persistent API. An
   enabled terminate phrase kills the tmux session and the API listener on port
   `8787`, causing callers to receive connection failures until restart.
