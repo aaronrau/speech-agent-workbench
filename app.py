@@ -5648,6 +5648,10 @@ def log_voice_api_configuration(config, commands, enabled):
             flush=True,
         )
         return
+    print(
+        f"[api] server listening on http://{format_voice_api_url_host(host)}:{port}",
+        flush=True,
+    )
     print(f"[api] POST {post_url}", flush=True)
     if format_voice_api_url_host(host) != host:
         print(f"[api] bound to {host}:{port}", flush=True)

@@ -256,6 +256,11 @@ the microphone:
 VOICE_API_ENABLED=1 VOICE_API_TOKEN=local-secret ./run-auto.sh
 ```
 
+Once the Wolf process binds successfully, its console prints both
+`[api] server listening on http://127.0.0.1:8787` and the full
+`POST /messages` endpoint. If those lines are absent, the workbench API is not
+running and callers will receive a connection failure.
+
 `run-auto.sh` also loads local defaults from `.env` when that file exists.
 Values supplied explicitly in the shell take precedence over `.env` values.
 For Agent Audio Pipe, start from `.env.agent-audio-pipe.example` so a bare
