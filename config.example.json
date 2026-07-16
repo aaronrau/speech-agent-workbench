@@ -102,23 +102,23 @@
     "agent_command": "codex --sandbox danger-full-access --ask-for-approval never",
     "agents": [
       {
-        "name": "Agent 1",
+        "name": "Flux",
         "path": "~"
       },
       {
-        "name": "Agent 2",
+        "name": "Brock",
         "path": "~"
       },
       {
-        "name": "Agent 3",
+        "name": "Pike",
         "path": "~"
       }
     ],
     "layout": "panes",
-    "panes_window": "Workbench",
-    "session_name": "speech-agent-workbench",
+    "panes_window": "Agents",
+    "session_name": "speech-workbench",
     "voice": {
-      "name": "Voice",
+      "name": "Wolf",
       "path": "."
     }
   }

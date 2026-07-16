@@ -30,3 +30,14 @@ Recent commits use short imperative summaries, for example `Default voice backen
 ## Security & Configuration Tips
 
 Do not commit `config.json`, virtualenvs, generated audio, local model caches, private paths, or credentials. Prefer `config.example.json` for shareable defaults. If a change downloads models, log the target cache directory and keep downloads resumable through the normal Hugging Face or ONNX tooling.
+
+## Agent Audio Pipe Integration
+
+- Agent Audio Pipe uses this repository's `POST /messages` API; the
+  `linux-voice-codex` dashboard is not a compatible substitute.
+- For glasses-provided ASR, start this workbench with
+  `./run-auto.sh --disable-stt` and keep the API token, API port, agent names,
+  summary webhook URL, and summary token aligned with Agent Audio Pipe.
+- Keep `auto_enable_terminate_commands` disabled for a persistent API. An
+  enabled terminate phrase kills the tmux session and the API listener on port
+  `8787`, causing callers to receive connection failures until restart.

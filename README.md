@@ -195,6 +195,12 @@ delivery, but audio listening stays permanently paused and Ctrl cannot resume
 STT. `AUTO_STT=0` is different: it skips starting the voice listener process
 entirely.
 
+When Agent Audio Pipe supplies ASR, `--disable-stt` is the intended mode. Keep
+`auto_enable_terminate_commands` set to `false` when the `/messages` API should
+remain continuously available. If termination commands are enabled,
+`Wolf terminate session` kills the workbench and the API listener on port
+`8787`; callers will fail until `run-auto.sh` is started again.
+
 On interactive launch, the workbench script shows the saved agent command, pane names, and paths. Accept the defaults or update them. The values are saved in `config.json`.
 When launched through `./run-auto.sh`, model downloads and enabled
 transcript-correction assets are checked in the foreground before tmux starts so
