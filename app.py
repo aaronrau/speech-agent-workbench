@@ -5369,7 +5369,7 @@ def build_api_agent_command_index(commands):
     index = {}
     labels = {}
     for alias, command in (commands or {}).items():
-        if not command.get("tmux_send_target"):
+        if not command.get("tmux_send_target") or command.get("tmux_send_text"):
             continue
         label = str(command.get("label") or alias or "").strip()
         if label:
@@ -5384,6 +5384,24 @@ def build_api_agent_command_index(commands):
                 index.setdefault(key, command)
     available = sorted(labels.values(), key=lambda value: value.lower())
     return index, available
+
+
+def build_api_control_command_labels(commands):
+    agent_controls = {}
+    session_controls = {}
+    for alias, command in (commands or {}).items():
+        label = str(command.get("label") or alias or "").strip()
+        key = normalize_voice_command_text(label)
+        if not key:
+            continue
+        if command.get("tmux_send_target") and command.get("tmux_send_text"):
+            agent_controls.setdefault(key, label)
+        elif command.get("exit_after") and not command.get("tmux_send_target"):
+            session_controls.setdefault(key, label)
+    return (
+        sorted(agent_controls.values(), key=lambda value: value.lower()),
+        sorted(session_controls.values(), key=lambda value: value.lower()),
+    )
 
 
 def get_api_control_correction_max_words(config):
@@ -5415,6 +5433,11 @@ def maybe_correct_api_control_text(config, control_text, available):
 
 def route_api_message_to_tmux(agent, message, commands, config=None):
     index, available = build_api_agent_command_index(commands)
+    agent_controls, session_controls = build_api_control_command_labels(commands)
+    correction_labels = sorted(
+        set(available + agent_controls + session_controls),
+        key=lambda value: value.lower(),
+    )
     key = normalize_voice_command_text(agent)
     command = index.get(key)
     if command is None:
@@ -5448,7 +5471,7 @@ def route_api_message_to_tmux(agent, message, commands, config=None):
         corrected_control_text, correction = maybe_correct_api_control_text(
             config,
             control_text,
-            available,
+            correction_labels,
         )
         if normalize_voice_command_text(
             corrected_control_text
@@ -5654,6 +5677,7 @@ def log_voice_api_configuration(config, commands, enabled):
     post_url = build_voice_api_post_url(host, port)
     token = get_voice_api_token(config)
     _index, available = build_api_agent_command_index(commands)
+    agent_controls, session_controls = build_api_control_command_labels(commands)
     if not enabled:
         print(
             f"[api] local message API disabled; enable VOICE_API_ENABLED=1 "
@@ -5682,6 +5706,16 @@ def log_voice_api_configuration(config, commands, enabled):
     print(f"[api] auth: {auth_status}", flush=True)
     print(
         f"[api] agents: {', '.join(available) if available else 'none configured'}",
+        flush=True,
+    )
+    print(
+        "[api] agent controls: "
+        f"{', '.join(agent_controls) if agent_controls else 'none configured'}",
+        flush=True,
+    )
+    print(
+        "[api] session controls: "
+        f"{', '.join(session_controls) if session_controls else 'none configured'}",
         flush=True,
     )
 

@@ -309,7 +309,13 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 "label": "flux",
                 "tmux_send_target": "%1",
                 "argv": ["tmux", "select-pane", "-t", "%1"],
-            }
+            },
+            "flux clear terminal": {
+                "label": "flux clear terminal",
+                "tmux_send_target": "%1",
+                "tmux_send_text": "/clear",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+            },
         }
 
         result = app.route_api_message_to_tmux(
@@ -321,6 +327,44 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "unknown_agent")
         self.assertEqual(result["available_agents"], ["flux"])
+
+    def test_log_voice_api_configuration_separates_agents_and_controls(self):
+        commands = {
+            "flux": {
+                "label": "Flux",
+                "tmux_send_target": "%1",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+            },
+            "flux clear terminal": {
+                "label": "Flux clear terminal",
+                "tmux_send_target": "%1",
+                "tmux_send_text": "/clear",
+                "argv": ["tmux", "select-pane", "-t", "%1"],
+            },
+            "wolf": {
+                "label": "Wolf",
+                "tmux_send_target": "%2",
+                "argv": ["tmux", "select-pane", "-t", "%2"],
+            },
+            "wolf terminate session": {
+                "label": "Wolf terminate session",
+                "argv": ["tmux", "kill-session", "-t", "speech-workbench"],
+                "exit_after": True,
+            },
+        }
+        config = {
+            "api_host": "127.0.0.1",
+            "api_port": 8787,
+            "api_token": "",
+        }
+
+        with mock.patch("builtins.print") as printed:
+            app.log_voice_api_configuration(config, commands, enabled=True)
+
+        lines = [call.args[0] for call in printed.call_args_list]
+        self.assertIn("[api] agents: Flux, Wolf", lines)
+        self.assertIn("[api] agent controls: Flux clear terminal", lines)
+        self.assertIn("[api] session controls: Wolf terminate session", lines)
 
     def test_route_api_message_to_tmux_runs_exact_control_command(self):
         commands = {
