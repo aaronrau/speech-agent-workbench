@@ -1023,25 +1023,29 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         messages = build_transcript_correction_messages(
             "Pipe check the latest branch",
             ["pike"],
-            {
-                "transcript_correction_prompt": (
-                    load_example_transcript_correction_prompt()
-                )
-            },
+            {},
         )
 
         self.assertIn("pipe", messages[0]["content"].lower())
         self.assertIn("write Pike", messages[0]["content"])
 
+    def test_transcript_correction_prompt_default_matches_example_config(self):
+        example_prompt = load_example_transcript_correction_prompt()
+
+        self.assertEqual(
+            app.DEFAULT_TRANSCRIPT_CORRECTION_PROMPT,
+            example_prompt,
+        )
+        self.assertEqual(
+            app.DEFAULT_CONFIG["transcript_correction_prompt"],
+            example_prompt,
+        )
+
     def test_transcript_correction_prompt_mentions_evals_mishears(self):
         messages = build_transcript_correction_messages(
             "run the evalues",
             [],
-            {
-                "transcript_correction_prompt": (
-                    load_example_transcript_correction_prompt()
-                )
-            },
+            {},
         )
 
         prompt = messages[0]["content"].lower()
@@ -1053,11 +1057,7 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         messages = build_transcript_correction_messages(
             "Agent two cleire terminal",
             ["agent two", "agent two clear terminal"],
-            {
-                "transcript_correction_prompt": (
-                    load_example_transcript_correction_prompt()
-                )
-            },
+            {},
         )
 
         system_prompt = messages[0]["content"].lower()

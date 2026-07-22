@@ -34,6 +34,37 @@ except Exception:
     Model = None
 
 
+DEFAULT_TRANSCRIPT_CORRECTION_PROMPT = (
+    "You clean up speech-to-text output for a voice-controlled coding agent "
+    "workbench. Fix only obvious transcription mistakes. Preserve the user's "
+    "intent and command target. Prefer coding terms such as Codex, tmux, Git, "
+    "GitHub, Langfuse, npm, pnpm, pytest, Docker, shell, branch, commit, diff, "
+    "build, lint, and test when the raw text sounds like them. If the first one "
+    "to three raw words sound like an available spoken routing target, replace "
+    "them with that exact target name. If a full raw phrase sounds similar to "
+    "an available spoken command, replace it with that exact command. For "
+    "available commands ending in clear terminal, decide whether the raw "
+    "phrase is asking to clear that target's terminal, session, or screen. "
+    "Treat clear session as a clear-terminal intent when the target has an "
+    "available clear-terminal command. If yes, rewrite to the exact available "
+    "clear-terminal command. If no, leave the user's wording intact. For "
+    "example, if the available target is flux and the raw text starts with "
+    "flex, write Flux. If the available target is pike and the raw text starts "
+    "with pipe, write Pike. When the raw text sounds like length view, lang "
+    "fuse, or land fuse, write Langfuse. When the raw text sounds like code x, "
+    "condex, codec, or kodex, write Codex. When the raw text sounds like yaws, "
+    "evalues, e values, e vals, or evals, write EVALS. When the raw text sounds "
+    "like hen all the chains push to death, or did all the change got pushed to "
+    "dev, write did all the changes get pushed to dev. Example: raw transcript: "
+    "send code x to length view. corrected transcript: send Codex to Langfuse. "
+    "Never invent routing targets or control commands when the raw transcript "
+    "is empty, unclear, or only background noise. Do not add terminate, "
+    "terminates, session, or sessions unless those words are explicitly present "
+    "in the raw transcript. If the raw transcript is empty, return an empty "
+    "line. Return only the corrected transcript on one line."
+)
+
+
 DEFAULT_CONFIG = {
     "hotkey": "right_shift",
     "sample_rate": 16000,
@@ -124,7 +155,7 @@ DEFAULT_CONFIG = {
     "transcript_correction_max_chars": 700,
     "transcript_correction_console_log": True,
     "transcript_correction_apply_to_probes": False,
-    "transcript_correction_prompt": None,
+    "transcript_correction_prompt": DEFAULT_TRANSCRIPT_CORRECTION_PROMPT,
     "transcript_correction_llama_cpp_path": "llama-cli",
     "transcript_correction_llama_cpp_server_path": "llama-server",
     "transcript_correction_llama_cpp_server_url": "http://127.0.0.1:18087",
@@ -3675,7 +3706,10 @@ def transcript_correction_console_log_enabled(config):
 def build_transcript_correction_messages(text, command_labels, config):
     configured_prompt = os.environ.get("VOICE_TRANSCRIPT_CORRECTION_PROMPT")
     if configured_prompt is None:
-        configured_prompt = config.get("transcript_correction_prompt")
+        configured_prompt = config.get(
+            "transcript_correction_prompt",
+            DEFAULT_TRANSCRIPT_CORRECTION_PROMPT,
+        )
     system_prompt = str(configured_prompt or "")
     labels = sorted({str(label).strip() for label in command_labels or [] if label})
     target_text = ", ".join(labels[:24]) if labels else "none"
