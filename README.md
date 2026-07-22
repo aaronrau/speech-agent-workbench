@@ -1,6 +1,126 @@
 # speech-agent-workbench
 
-Voice control for Linux and macOS agent workspaces: speak a command, route it to the right tmux agent, and submit it without touching the keyboard.
+`speech-agent-workbench` is a local voice and message router for coding agents
+on Linux and macOS. It creates a tmux workspace, listens for an agent name,
+cleans up speech-recognition mistakes, and focuses or sends a prompt to the
+matching agent without requiring keyboard input or desktop focus.
+
+## Quick Start and Commands
+
+The same public commands work on Linux and macOS; each launcher selects the
+matching implementation automatically.
+
+| Task | Command |
+| --- | --- |
+| Install dependencies, create `.venv`, create `config.json`, and prefetch the default STT model | `./install.sh` |
+| Install every optional transcription backend | `VOICE_INSTALL_FULL_REQUIREMENTS=1 ./install.sh` |
+| Run plain voice dictation in the currently focused app | `./run.sh` |
+| Start the tmux agent workbench with local microphone/STT | `./run-auto.sh` |
+| Start the workbench without local microphone/STT while keeping enabled API and listener services active | `./run-auto.sh --disable-stt` |
+| Start from the persistent Agent Audio Pipe environment template | `cp .env.agent-audio-pipe.example .env`, then `./run-auto.sh` |
+| Skip foreground model checks for one workbench launch | `VOICE_AUTO_PREFETCH_MODELS=off ./run-auto.sh` |
+| Disable automatic tmux installation for one launch | `VOICE_AUTO_INSTALL_TMUX=0 ./run-auto.sh` |
+| Skip interactive macOS microphone and pause-key selection | `VOICE_MACOS_INPUT_PROMPT=0 ./run-auto.sh` |
+| Start tmux without starting the voice listener or its services | `AUTO_STT=0 ./run-auto.sh` |
+| Run the automated tests | `make test` |
+| Run the real tmux integration tests | `make test-real-tmux` |
+
+`./setup.sh` is an alias for `./install.sh`. Most users should run
+`./run-auto.sh`; `./start-agent-workbench.sh` is the lower-level tmux launcher
+used after dependency and model preflight.
+
+### Spoken and Keyboard Commands
+
+The examples below use the default agents `Flux`, `Brock`, and `Pike`. Agent
+names and aliases come from `agent_workbench.agents` in `config.json`.
+
+| Say or press | Result |
+| --- | --- |
+| `Flux` | Focus the Flux tmux pane or window. |
+| `Brock add tests for the API` | Focus Brock, send `add tests for the API` directly through tmux, and press Enter. |
+| `Pike clear terminal` | Focus Pike, send `/clear`, and press Enter. |
+| `agent write a reply about payments` | In plain dictation mode, remove the configured trigger word, type the remaining text into the focused app, and submit it. |
+| `Ctrl` | Pause or resume local microphone listening in auto mode. API routing remains available while paused. |
+| `Wolf terminate session` | Kill the tmux session. This is enabled by default and requires an exact raw-speech match. |
+
+Agent-prefixed messages use tmux directly, so sending content does not depend on
+the terminal being the active desktop window. A name by itself changes the
+selected tmux target and then makes a best-effort attempt to focus the terminal
+application. Numeric agent names also receive equivalent spoken-number aliases
+automatically.
+
+The normal tmux keyboard controls remain available in the terminal when using
+tmux's default `Ctrl-b` prefix:
+
+| Keys | Result |
+| --- | --- |
+| `Ctrl-b`, then an arrow key | Move focus to an adjacent pane. |
+| `Ctrl-b o` | Cycle through panes. |
+| `Ctrl-b z` | Zoom or unzoom the current pane. |
+| `Ctrl-b d` | Detach while leaving the agents running. |
+
+Reattach to the default session with `tmux attach -t speech-workbench`.
+
+### Message API Commands
+
+Enable the local API with a token:
+
+```bash
+VOICE_API_ENABLED=1 VOICE_API_TOKEN=local-secret ./run-auto.sh
+```
+
+Then use `POST /messages` to send prompts or control the workbench:
+
+```bash
+# Send a prompt to an agent.
+curl -sS http://127.0.0.1:8787/messages \
+  -H 'Authorization: Bearer local-secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"Flux","message":"pull the latest changes"}'
+
+# Request a read-only summary of the agent's current tmux output.
+curl -sS http://127.0.0.1:8787/messages \
+  -H 'Authorization: Bearer local-secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"local","agent":"Flux","message":"progress_summary"}'
+
+# Run the same exact clear command accepted from speech.
+curl -sS http://127.0.0.1:8787/messages \
+  -H 'Authorization: Bearer local-secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Flux clear terminal"}'
+```
+
+Agents can report completion from inside their pane with:
+
+```bash
+$VOICE_AGENT_SIGNAL_COMMAND done "tests passed"
+```
+
+## How It Works
+
+1. `install.sh`, `run.sh`, and `run-auto.sh` detect Linux or macOS and dispatch
+   to the matching platform scripts. The launchers check Python, tmux, the STT
+   model, and enabled llama.cpp correction assets before starting.
+2. `run-auto.sh` creates one tmux workspace containing three configurable agent
+   panes and one voice-listener pane. Each agent starts in its configured
+   working directory with `agent_workbench.agent_command`.
+3. Microphone audio is segmented by VAD and transcribed locally with Parakeet
+   ONNX by default. Agent Audio Pipe can instead send text through the local
+   HTTP API while the workbench runs with `--disable-stt`.
+4. The transcript first receives deterministic fixes for common coding terms.
+   When `transcript_correction_backend` is `llama-cpp`, the local Gemma model
+   gets the complete correction policy plus the currently available agent names
+   and control commands.
+5. The command matcher decides whether the result is a focus command, a routed
+   agent message, an exact clear-terminal command, or the exact terminate
+   command. Safety checks prevent the correction model from inventing
+   termination intent; `Wolf terminate session` is enabled by default.
+6. Routed text is inserted with tmux and submitted with Enter. Plain dictation
+   uses the platform clipboard/keyboard integration instead.
+7. Successful messages are recorded in transcript history. Optional background
+   workers capture agent output, create local llama.cpp summaries, print
+   completion signals, and deliver configured summary webhooks.
 
 ## Project Status
 
@@ -127,16 +247,17 @@ Important fields:
 The built-in fast cleanup always fixes common coding-agent ASR mistakes such as
 `condex`/`code x` to `Codex`, `tea mux` to `tmux`, and `git hub` to `GitHub`.
 It also treats `length view`, `lang fuse`, and similar phonetic variants as
-`Langfuse`, and `yaws`, `evalues`, `e values`, and `e vals` as `EVALS`. It
-adds command aliases like `agent to`, `agent too`, and `agent 2` for a
-configured `agent two` pane.
+`Langfuse`, and `yaws`, `evalues`, `e values`, and `e vals` as `EVALS`. The
+default agent routes include voice-friendly aliases such as `flex` for `Flux`,
+`block` for `Brock`, and `pipe` for `Pike`.
 
 For model-based cleanup with llama.cpp, add values like these to your local
 `config.json`. These are examples; keep your real local paths and runtime
 settings in `config.json`, which is git-ignored.
-The default correction prompt is also configured in `config.example.json` under
-`transcript_correction_prompt`; copy or edit that value in your local
-`config.json` when changing correction behavior.
+The complete correction policy is an in-code runtime default and is mirrored in
+`config.example.json` under `transcript_correction_prompt`. Override that value
+in local `config.json` or with `VOICE_TRANSCRIPT_CORRECTION_PROMPT` only when
+custom correction behavior is required.
 
 ```json
 {
@@ -182,7 +303,7 @@ exact phrase `Wolf terminate session`. To customize the phrase, use:
 {
   "auto_enable_terminate_commands": true,
   "auto_tmux_terminate_words": [
-    "voice confirm terminate session"
+    "Wolf confirm terminate session"
   ]
 }
 ```
@@ -203,20 +324,15 @@ Use short names with hard consonants and distinct vowel sounds so STT does not
 confuse pane names with each other or with command words like `yes`, `no`,
 `send`, `save`, or `stop`.
 
-Good examples:
+The default names are intentionally short and distinct:
 
 - `Flux`
 - `Brock`
-- `Knox`
 - `Pike`
-- `Slate`
-- `Brock`
-- `Vance`
-- `Rook`
-- `Wolf`
+- `Wolf` (voice-listener pane)
 
-Avoid names that sound like common confirmations or commands, such as `Jazz`
-near `yes`, `Bo` near `no`, or `Sage` near `save`.
+Avoid replacing these with names that sound like common confirmations or
+commands such as yes, no, send, save, or stop.
 
 ## Run Plain Dictation
 
@@ -251,10 +367,10 @@ To run the workbench listener services without microphone/STT capture, use:
 ./run-auto.sh --disable-stt
 ```
 
-This starts the API, tmux summary tailer, completion tailer, and webhook
-delivery, but audio listening stays permanently paused and Ctrl cannot resume
-STT. `AUTO_STT=0` is different: it skips starting the voice listener process
-entirely.
+This starts the listener service process, including the API and background
+tailers when they are enabled, but audio listening stays permanently paused and
+Ctrl cannot resume STT. `AUTO_STT=0` is different: it skips starting the voice
+listener process entirely.
 
 When Agent Audio Pipe supplies ASR, `--disable-stt` is the intended mode. Keep
 `auto_enable_terminate_commands` set to `false` when the `/messages` API should
@@ -312,8 +428,8 @@ look like this:
 ```
 
 Say `brock add tests for phone verification` to send that prompt to the
-`Brock` pane. If you opt into terminate commands, use the exact phrase you
-configured in `auto_tmux_terminate_words`.
+`Brock` pane. Say `Wolf terminate session` to use the default exact shutdown
+command.
 
 ### Local Message API
 
@@ -390,8 +506,8 @@ event with `"phase": "final"`, `"is_final": true`, and the latest captured
 Webhook detail lines are incremental per agent: lines already delivered in the
 previous webhook payload for that same agent are omitted from the next
 `detail`/`detail_lines` value.
-The voice listener pane is excluded from summary webhook delivery, including
-the default `Voice` name and local `Wolf` voice pane name.
+The configured voice-listener pane is excluded from summary webhook delivery;
+its default name is `Wolf`.
 
 Use `VOICE_TMUX_SUMMARY_WEBHOOK_TOKEN` to send an `Authorization: Bearer ...`
 header and `VOICE_TMUX_SUMMARY_WEBHOOK_TIMEOUT` to tune the POST timeout.
