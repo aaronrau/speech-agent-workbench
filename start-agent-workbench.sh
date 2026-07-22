@@ -603,7 +603,7 @@ wait_for_auto_stt_ready() {
   start="$(date +%s)"
   while true; do
     if [[ -s "$AUTO_READY_FILE" ]]; then
-      echo "[agents] voice models ready: $AUTO_READY_FILE"
+      echo "[agents] voice READY: microphone is listening; SPEAK NOW."
       return 0
     fi
     if [[ -n "$pid" ]] && ! process_is_running "$pid"; then

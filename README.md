@@ -234,13 +234,21 @@ Important fields:
 - `sherpa_model_dir`: included Parakeet ONNX model directory
 - `auto_trigger_word`: default is `agent`
 - `auto_trigger_aliases`: defaults include `codex`, `code x`, and `condex`
-- `auto_trigger_silence_seconds`: defaults to `3.0` seconds before an utterance ends
+- `auto_trigger_silence_seconds`: defaults to `2.0` seconds after the most recent VAD speech detection; newly detected speech resets the timer
+- `auto_trigger_max_probes`: limits overlapping trigger-word transcriptions to `4`
+- `audio_debug`: defaults to `false` to hide probe and WAV diagnostics
 - `auto_enable_terminate_commands`: defaults to `true`; set it to `false` for a persistent API
 - `transcript_correction_backend`: set to `llama-cpp` for model cleanup
 - `transcript_correction_llama_cpp_model`: GGUF model path for llama.cpp cleanup
+- `transcript_correction_llama_cpp_model_repo`: Hugging Face repository used when the GGUF is missing
+- `transcript_correction_llama_cpp_model_download`: defaults to `true`; downloads the GGUF required by transcript correction or tmux summaries
 - `paste_mode`: `type`, `clipboard`, `hotkey`, or `auto`
 - `agent_workbench.agent_command`: command to start in each agent pane; default example is `codex --sandbox danger-full-access --ask-for-approval never`
 - `agent_workbench.agents`: pane names and working directories
+
+Set `VOICE_AUDIO_DEBUG=1` to temporarily restore per-probe transcripts and WAV
+level details. Probe inference stops after the configured limit when no routing
+target is heard, while final utterance transcription still runs normally.
 
 ### llama.cpp STT Cleanup
 
@@ -266,7 +274,8 @@ custom correction behavior is required.
   "transcript_correction_llama_cpp_server_path": "llama-server",
   "transcript_correction_llama_cpp_server_url": "http://127.0.0.1:18087",
   "transcript_correction_llama_cpp_server_autostart": true,
-  "transcript_correction_llama_cpp_model": "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q8_0.gguf",
+  "transcript_correction_llama_cpp_model": "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_0.gguf",
+  "transcript_correction_llama_cpp_model_repo": "ggml-org/gemma-4-E2B-it-GGUF",
   "transcript_correction_llama_cpp_gpu_layers": 99,
   "transcript_correction_max_new_tokens": 256
 }
@@ -405,7 +414,12 @@ download/cache logs are visible. Set `VOICE_AUTO_PREFETCH_MODELS=off` to skip
 that foreground check. If `tmux` is missing, `run-auto.sh` installs it with
 Homebrew on macOS or apt on Debian/Ubuntu before starting the workbench. Set
 `VOICE_AUTO_INSTALL_TMUX=0` to disable that automatic system-package change.
-The launcher does not block on the voice pane by default after startup. Set `AUTO_READY_TIMEOUT=300` to wait for a ready signal from the listener.
+The voice pane reports `[voice][LOADING]` while models initialize, then
+`[voice][READY] SPEAK NOW` only after the microphone has started. During an
+utterance it changes to `[voice][LISTENING]`, followed by
+`[voice][PROCESSING]` after the configured VAD silence interval. The launcher
+does not block on the voice pane by default after startup. Set
+`AUTO_READY_TIMEOUT=300` to wait for the same microphone-ready signal.
 
 ### Example Run
 
@@ -422,7 +436,7 @@ look like this:
 +------------------------------+------------------------------+
 | Pike                         | Wolf                         |
 | $ codex --sandbox ...        | $ ./run-auto.sh              |
-| > Update Flutter states      | [auto] parakeet-onnx ready   |
+| > Update Flutter states      | [voice][READY] SPEAK NOW     |
 |                              | routes: "brock add tests"    |
 +------------------------------+------------------------------+
 ```

@@ -8,6 +8,7 @@ from unittest import mock
 from app import (
     append_transcript_history,
     arm_auto_trigger_session,
+    auto_silence_timeout_reached,
     auto_shell_command_has_explicit_audio,
     build_command_text_aliases,
     build_transcript_correction_messages,
@@ -76,6 +77,19 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertEqual(
             split_trailing_submit_command("send later"),
             ("send later", False),
+        )
+
+    def test_auto_silence_timer_resets_from_latest_vad_detection(self):
+        silence_samples = 32000
+
+        self.assertTrue(
+            auto_silence_timeout_reached(48000, 16000, silence_samples)
+        )
+        self.assertFalse(
+            auto_silence_timeout_reached(48000, 40000, silence_samples)
+        )
+        self.assertFalse(
+            auto_silence_timeout_reached(48000, None, silence_samples)
         )
 
     def test_split_trailing_submit_command_ignores_embedded_suffix(self):
@@ -150,6 +164,26 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 now=15.0,
             )
         )
+
+    def test_tmux_console_buffer_keeps_only_bounded_tail(self):
+        buffer = ["first-", "second-", "third"]
+
+        removed = app.trim_text_chunk_buffer(buffer, 12)
+
+        self.assertGreater(removed, 0)
+        self.assertEqual("".join(buffer), "second-third")
+
+    def test_probe_runs_only_focus_commands(self):
+        focus = {"tmux_send_target": "%1", "argv": ["tmux", "select-pane"]}
+        clear = {
+            "tmux_send_target": "%1",
+            "tmux_send_text": "/clear",
+        }
+        terminate = {"exit_after": True, "requires_explicit_audio": True}
+
+        self.assertTrue(app.auto_shell_command_can_run_during_probe(focus))
+        self.assertFalse(app.auto_shell_command_can_run_during_probe(clear))
+        self.assertFalse(app.auto_shell_command_can_run_during_probe(terminate))
 
     def test_tmux_recent_command_matches_display_label(self):
         app.TMUX_RECENT_COMMANDS.clear()

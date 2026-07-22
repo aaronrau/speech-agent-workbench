@@ -53,7 +53,7 @@ export VOICE_AUTO_TRIGGER_WORD="${VOICE_AUTO_TRIGGER_WORD:-agent}"
 export VOICE_AUTO_TRIGGER_PROBE_SECONDS="${VOICE_AUTO_TRIGGER_PROBE_SECONDS:-0.5}"
 export VOICE_AUTO_TRIGGER_MIN_PROBE_SECONDS="${VOICE_AUTO_TRIGGER_MIN_PROBE_SECONDS:-1}"
 export VOICE_AUTO_TRIGGER_PROBE_WINDOW_SECONDS="${VOICE_AUTO_TRIGGER_PROBE_WINDOW_SECONDS:-1.5}"
-export VOICE_AUTO_TRIGGER_SILENCE_SECONDS="${VOICE_AUTO_TRIGGER_SILENCE_SECONDS:-3}"
+export VOICE_AUTO_TRIGGER_SILENCE_SECONDS="${VOICE_AUTO_TRIGGER_SILENCE_SECONDS:-2}"
 export VOICE_AUTO_START_SPEECH_MS="${VOICE_AUTO_START_SPEECH_MS:-60}"
 export VOICE_AUTO_PRE_ROLL_SECONDS="${VOICE_AUTO_PRE_ROLL_SECONDS:-1.5}"
 export VOICE_AUTO_VAD_BACKEND="${VOICE_AUTO_VAD_BACKEND:-sherpa}"
@@ -463,15 +463,30 @@ backend = os.environ.get("VOICE_TRANSCRIPT_CORRECTION_BACKEND")
 if backend is None:
     backend = config.get("transcript_correction_backend", "off")
 backend = str(backend or "").strip().lower()
-if backend in ("", "0", "false", "no", "none", "null", "off"):
-    raise SystemExit(0)
 if backend in ("gemma", "gemma4", "gemma-4", "llama", "llamacpp", "llama.cpp"):
     backend = "llama-cpp"
-if backend != "llama-cpp":
+correction_uses_llama = backend == "llama-cpp"
+correction_is_off = backend in ("", "0", "false", "no", "none", "null", "off")
+if not correction_is_off and not correction_uses_llama:
     print(
         f"[run] transcript correction backend '{backend}' is not managed by run.sh.",
         file=sys.stderr,
     )
+
+
+def config_bool(env_name, config_name, default):
+    value = os.environ.get(env_name)
+    if value is None:
+        value = config.get(config_name, default)
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+summary_enabled = config_bool(
+    "VOICE_AUTO_TMUX_SUMMARY_ENABLED",
+    "auto_tmux_summary_enabled",
+    True,
+)
+if not correction_uses_llama and not summary_enabled:
     raise SystemExit(0)
 
 
@@ -491,10 +506,7 @@ def resolve_path(value, *, executable=False):
         found = shutil.which(value)
         if found:
             return found
-    candidate = os.path.join(root, value)
-    if os.path.exists(candidate) or executable:
-        return candidate
-    return value
+    return os.path.join(root, value)
 
 
 binary = resolve_path(
@@ -509,36 +521,67 @@ model = resolve_path(
     configured_path(
         "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_MODEL",
         "transcript_correction_llama_cpp_model",
-        "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q8_0.gguf",
+        "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_0.gguf",
     )
 )
+model_repo = configured_path(
+    "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_MODEL_REPO",
+    "transcript_correction_llama_cpp_model_repo",
+    "ggml-org/gemma-4-E2B-it-GGUF",
+)
+model_download = config_bool(
+    "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_MODEL_DOWNLOAD",
+    "transcript_correction_llama_cpp_model_download",
+    True,
+)
 
-errors = []
-if not binary or not os.path.isfile(binary) or not os.access(binary, os.X_OK):
-    errors.append(f"llama.cpp binary is missing or not executable: {binary or '<unset>'}")
-if not model or not os.path.isfile(model):
-    errors.append(f"transcript correction model is missing: {model or '<unset>'}")
-if errors:
-    for error in errors:
-        print(f"[run] {error}", file=sys.stderr)
-    raise SystemExit(1)
-
-print("[run] transcript correction -> llama.cpp", file=sys.stderr)
-print(f"[run] llama.cpp binary: {binary}", file=sys.stderr)
-print(f"[run] llama.cpp model: {model}", file=sys.stderr)
+print("export VOICE_LLAMA_ASSETS_REQUIRED=1")
 print(
-    "export VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_PATH="
+    "export VOICE_LLAMA_ASSET_BINARY="
     + shlex.quote(binary)
 )
 print(
-    "export VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_MODEL="
+    "export VOICE_LLAMA_ASSET_MODEL="
     + shlex.quote(model)
+)
+print(
+    "export VOICE_LLAMA_ASSET_MODEL_REPO="
+    + shlex.quote(model_repo)
+)
+print(
+    "export VOICE_LLAMA_ASSET_MODEL_DOWNLOAD="
+    + ("1" if model_download else "0")
 )
 PY
 )"
   if [[ -n "$exports" ]]; then
     eval "$exports"
   fi
+  if [[ "${VOICE_LLAMA_ASSETS_REQUIRED:-0}" != "1" ]]; then
+    return 0
+  fi
+  if [[ ! -x "${VOICE_LLAMA_ASSET_BINARY:-}" ]]; then
+    echo "[run] llama.cpp binary is missing or not executable: ${VOICE_LLAMA_ASSET_BINARY:-<unset>}" >&2
+    return 1
+  fi
+  if [[ ! -f "${VOICE_LLAMA_ASSET_MODEL:-}" ]]; then
+    if is_truthy "${VOICE_LLAMA_ASSET_MODEL_DOWNLOAD:-0}"; then
+      "$PYTHON_BIN" "$ROOT/scripts/prefetch_llama_cpp_model.py" \
+        --model "$VOICE_LLAMA_ASSET_MODEL" \
+        --repo "$VOICE_LLAMA_ASSET_MODEL_REPO"
+    else
+      echo "[run] llama.cpp model is missing and automatic download is disabled: ${VOICE_LLAMA_ASSET_MODEL:-<unset>}" >&2
+      return 1
+    fi
+  fi
+  if [[ ! -f "${VOICE_LLAMA_ASSET_MODEL:-}" ]]; then
+    echo "[run] llama.cpp model download did not create: ${VOICE_LLAMA_ASSET_MODEL:-<unset>}" >&2
+    return 1
+  fi
+  export VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_PATH="$VOICE_LLAMA_ASSET_BINARY"
+  export VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_MODEL="$VOICE_LLAMA_ASSET_MODEL"
+  echo "[run] llama.cpp binary: $VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_PATH" >&2
+  echo "[run] llama.cpp model: $VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_MODEL" >&2
 }
 
 is_truthy() {

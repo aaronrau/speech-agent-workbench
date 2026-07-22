@@ -20,7 +20,9 @@ class DefaultConfigTests(unittest.TestCase):
         ) as handle:
             config = json.load(handle)
 
-        self.assertEqual(config["auto_trigger_silence_seconds"], 3.0)
+        self.assertEqual(config["auto_trigger_silence_seconds"], 2.0)
+        self.assertEqual(config["auto_trigger_max_probes"], 4)
+        self.assertFalse(config["audio_debug"])
         self.assertEqual(
             config["auto_trigger_silence_seconds"],
             DEFAULT_CONFIG["auto_trigger_silence_seconds"],
@@ -36,6 +38,11 @@ class DefaultConfigTests(unittest.TestCase):
         )
         self.assertTrue(config["transcript_correction_prompt"].strip())
         self.assertTrue(config["transcript_correction_llama_cpp_model"].strip())
+        self.assertEqual(
+            config["transcript_correction_llama_cpp_model_repo"],
+            "ggml-org/gemma-4-E2B-it-GGUF",
+        )
+        self.assertTrue(config["transcript_correction_llama_cpp_model_download"])
 
 
 @unittest.skipUnless(shutil.which("tmux"), "real tmux is not installed")

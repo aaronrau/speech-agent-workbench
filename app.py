@@ -103,6 +103,7 @@ DEFAULT_CONFIG = {
     "chunk_vad_frame_ms": 30,
     "chunk_vad_silence_ms": 240,
     "chunk_vad_threshold": 0.012,
+    "audio_debug": False,
     "run_mode": "hotkey",
     "auto_start_speech_ms": 60,
     "auto_pre_roll_seconds": 1.5,
@@ -117,10 +118,11 @@ DEFAULT_CONFIG = {
     "auto_sherpa_vad_provider": "cpu",
     "auto_sherpa_vad_num_threads": 1,
     "auto_trigger_word": "agent",
-    "auto_trigger_silence_seconds": 3.0,
+    "auto_trigger_silence_seconds": 2.0,
     "auto_trigger_probe_seconds": 0.5,
     "auto_trigger_min_probe_seconds": 1.0,
     "auto_trigger_probe_window_seconds": 1.5,
+    "auto_trigger_max_probes": 4,
     "auto_trigger_arm_timeout_seconds": 8.0,
     "auto_trigger_aliases": ["codex", "code x", "condex"],
     "auto_tmux_switch_session": None,
@@ -162,8 +164,12 @@ DEFAULT_CONFIG = {
     "transcript_correction_llama_cpp_server_autostart": True,
     "transcript_correction_llama_cpp_server_startup_timeout": 60.0,
     "transcript_correction_llama_cpp_model": (
-        "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q8_0.gguf"
+        "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_0.gguf"
     ),
+    "transcript_correction_llama_cpp_model_repo": (
+        "ggml-org/gemma-4-E2B-it-GGUF"
+    ),
+    "transcript_correction_llama_cpp_model_download": True,
     "transcript_correction_llama_cpp_gpu_layers": 99,
     "transcript_correction_llama_cpp_timeout": 20.0,
     "submit_enter_delay_seconds": 0.5,
@@ -437,6 +443,23 @@ def parse_config_bool(value):
     if normalized in ("0", "false", "no", "none", "null", "off", ""):
         return False
     return None
+
+
+def audio_debug_enabled(config):
+    value = os.environ.get("VOICE_AUDIO_DEBUG")
+    if value is None:
+        value = config.get("audio_debug", DEFAULT_CONFIG["audio_debug"])
+    return bool(parse_config_bool(value))
+
+
+def auto_shell_command_can_run_during_probe(command):
+    if not command or not command.get("tmux_send_target"):
+        return False
+    return not (
+        command.get("tmux_send_text")
+        or command.get("exit_after")
+        or command.get("requires_explicit_audio")
+    )
 
 
 def terminate_commands_enabled(config):
@@ -3213,11 +3236,12 @@ def transcribe_remote(wav_path, config):
             if raise_on_error:
                 raise RemoteTranscribeError(message)
             return ""
-        stats = inspect_wav(wav_path)
-        print(
-            f"[transcribe] {format_wav_stats('client wav', wav_path, stats)}",
-            file=sys.stderr,
-        )
+        if audio_debug_enabled(config):
+            stats = inspect_wav(wav_path)
+            print(
+                f"[transcribe] {format_wav_stats('client wav', wav_path, stats)}",
+                file=sys.stderr,
+            )
         with open(wav_path, "rb") as handle:
             data = handle.read()
         req = urllib.request.Request(
@@ -4796,6 +4820,17 @@ def flush_tmux_console_buffer(buffer):
     return True
 
 
+def trim_text_chunk_buffer(buffer, max_chars):
+    limit = max(1, int(max_chars or 0))
+    total = sum(len(chunk) for chunk in buffer)
+    if total <= limit:
+        return 0
+    retained = "".join(buffer)[-limit:]
+    removed = total - len(retained)
+    buffer[:] = [retained]
+    return removed
+
+
 def extract_tmux_console_agent_payload(payload):
     text = str(payload or "")
     match = re.search(r"\[tmux\]\[([^\]]+)\]\s*", text)
@@ -6160,6 +6195,7 @@ def start_auto_tmux_console_log_tailer(config):
         pending_output = []
         last_output_at = None
         agent_states = {}
+        summary_unavailable = False
         reported_read_error = False
         while not stop_event.is_set():
             try:
@@ -6192,11 +6228,23 @@ def start_auto_tmux_console_log_tailer(config):
                                         },
                                     )
                                     state["chunks"].append(agent_payload)
+                                    trim_text_chunk_buffer(
+                                        state["chunks"],
+                                        max(16000, summary_max_chars * 2),
+                                    )
                                     updated_agents.add(agent_label)
                             elif line.startswith("{"):
                                 pending_output.append(payload)
+                                trim_text_chunk_buffer(
+                                    pending_output,
+                                    max(1048576, max_bytes),
+                                )
                             else:
                                 pending_output.append(payload + "\n")
+                                trim_text_chunk_buffer(
+                                    pending_output,
+                                    max(1048576, max_bytes),
+                                )
                             saw_output = True
 
                 now = time.monotonic()
@@ -6240,6 +6288,8 @@ def start_auto_tmux_console_log_tailer(config):
                         if digest == state.get("last_digest"):
                             continue
                         state["last_digest"] = digest
+                        if summary_unavailable:
+                            continue
                         try:
                             summary = summarize_tmux_agent_output(
                                 config,
@@ -6248,12 +6298,16 @@ def start_auto_tmux_console_log_tailer(config):
                                 summary_input_lines,
                             )
                         except Exception as exc:
+                            summary_unavailable = True
                             print(
-                                f"\n[tmux-summary][{agent_label}] Command: "
-                                f"{command_text or 'unknown'}"
+                                "\n[tmux-summary] Optional summaries disabled for "
+                                f"this run: {exc}",
+                                file=sys.stderr,
+                                flush=True,
                             )
                             print(
-                                f"[tmux-summary][{agent_label}] Summary failed: {exc}",
+                                "[tmux-summary] Voice capture and routing are still "
+                                "available. Restart after fixing the model.",
                                 file=sys.stderr,
                                 flush=True,
                             )
@@ -7627,6 +7681,16 @@ def get_auto_initial_scan_sample(total_samples, pre_roll_samples):
     return max(0, int(total_samples) - max(0, int(pre_roll_samples)))
 
 
+def auto_silence_timeout_reached(
+    frame_end_sample,
+    last_voice_sample,
+    silence_samples,
+):
+    if last_voice_sample is None:
+        return False
+    return frame_end_sample - last_voice_sample >= silence_samples
+
+
 def run_auto_with_stt_disabled(config, run_mode):
     auto_shell_commands = build_auto_tmux_switch_commands(config)
     start_transcript_correction_server_background(config)
@@ -7788,6 +7852,11 @@ def main():
         )
         hotkey_display = normalize_hotkey_name(hotkey_name)
 
+    print(
+        "[voice][LOADING] Preparing speech recognition. "
+        "Wait for READY before speaking...",
+        flush=True,
+    )
     transcribe_audio, transcribe_backend, _transcribe_model_label = (
         resolve_initial_transcriber(config, sample_rate, channels)
     )
@@ -7905,7 +7974,7 @@ def main():
         config,
         "VOICE_AUTO_TRIGGER_SILENCE_SECONDS",
         "auto_trigger_silence_seconds",
-        3.0,
+        2.0,
         minimum=0.2,
     )
     auto_trigger_probe_seconds = get_config_float(
@@ -7928,6 +7997,13 @@ def main():
         "auto_trigger_probe_window_seconds",
         1.5,
         minimum=0.5,
+    )
+    auto_trigger_max_probes = get_config_int(
+        config,
+        "VOICE_AUTO_TRIGGER_MAX_PROBES",
+        "auto_trigger_max_probes",
+        4,
+        minimum=0,
     )
     auto_trigger_arm_timeout_seconds = get_config_float(
         config,
@@ -7979,7 +8055,6 @@ def main():
     )
     auto_vad_detector = build_sherpa_vad(config, sample_rate)
     start_transcript_correction_server_background(config)
-    signal_voice_ready(run_mode, transcribe_backend, _transcribe_model_label)
     tmux_console_log_tailer = None
     agent_completion_log_tailer = None
     voice_api_server = None
@@ -8126,18 +8201,21 @@ def main():
         log_prefix = session_state.get("log_prefix", "hotkey")
         transcribe_name = session_state["transcribe_name"]
         duration = len(sample_block) / float(sample_rate or 1)
-        print(
-            f"[{log_prefix}] transcribing chunk {chunk_index + 1} "
-            f"({duration:.2f}s) with '{transcribe_name}'..."
-        )
+        quiet = bool(session_state.get("quiet"))
+        if not quiet:
+            print(
+                f"[{log_prefix}] transcribing chunk {chunk_index + 1} "
+                f"({duration:.2f}s) with '{transcribe_name}'..."
+            )
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
             wav_path = handle.name
         try:
             write_wav(wav_path, sample_block, sample_rate, channels)
-            print(
-                f"[{log_prefix}] "
-                f"{format_wav_stats(f'chunk {chunk_index + 1} wav', wav_path)}"
-            )
+            if audio_debug_enabled(config):
+                print(
+                    f"[{log_prefix}] "
+                    f"{format_wav_stats(f'chunk {chunk_index + 1} wav', wav_path)}"
+                )
             try:
                 with get_backend_lock(transcribe_name):
                     text = run_transcribe_request(
@@ -8201,7 +8279,8 @@ def main():
         if text:
             session_state["last_transcript_correction"] = correction
             session_state.setdefault("transcript_corrections", []).append(correction)
-            print(f"[{log_prefix}] chunk {chunk_index + 1} -> {text}")
+            if not quiet:
+                print(f"[{log_prefix}] chunk {chunk_index + 1} -> {text}")
         return text
 
     def transcribe_chunk_loop(session_state):
@@ -8475,7 +8554,7 @@ def main():
             else:
                 print("[auto] paused audio listening. Press Ctrl again to resume.")
         else:
-            print("[auto] resumed audio listening.")
+            print_auto_waiting()
 
     def toggle_auto_pause():
         with auto_control["lock"]:
@@ -8543,7 +8622,16 @@ def main():
 
     def print_auto_waiting():
         if auto_shell_commands:
-            print("[auto] waiting for: " + format_colored_detection_words(), flush=True)
+            print(
+                "[voice][READY] SPEAK NOW - start with: "
+                + format_colored_detection_words(),
+                flush=True,
+            )
+        else:
+            print(
+                "[voice][READY] SPEAK NOW - microphone is listening.",
+                flush=True,
+            )
 
     def click_auto_trigger_target(source="trigger"):
         print(f"[auto] trigger '{auto_trigger_word}' detected; clicking target...")
@@ -8586,6 +8674,7 @@ def main():
             return False
         session_state = select_auto_transcriber()
         session_state["skip_transcript_correction"] = True
+        session_state["quiet"] = not audio_debug_enabled(config)
         text = transcribe_sample_block(session_state, samples, chunk_index).strip()
         if not text:
             return False
@@ -8596,30 +8685,38 @@ def main():
         if command_prefix is not None:
             shell_command, _queued_text = command_prefix
             reset_auto_trigger_session(auto_trigger_session)
-            if auto_shell_command_allowed(
-                shell_command,
-                session_state.get("last_transcript_correction"),
+            switched = False
+            if (
+                auto_shell_command_can_run_during_probe(shell_command)
+                and auto_shell_command_allowed(
+                    shell_command,
+                    session_state.get("last_transcript_correction"),
+                )
             ):
-                run_auto_shell_command(shell_command)
+                switched = run_auto_shell_command(shell_command)
             print_auto_waiting()
-            return False
+            return switched
         shell_command = safe_match_auto_shell_command(text, auto_shell_commands)
         if shell_command is not None:
             reset_auto_trigger_session(auto_trigger_session)
+            if not auto_shell_command_can_run_during_probe(shell_command):
+                return True
+            switched = False
             if auto_shell_command_allowed(
                 shell_command,
                 session_state.get("last_transcript_correction"),
             ):
-                run_auto_shell_command(shell_command)
+                switched = run_auto_shell_command(shell_command)
             print_auto_waiting()
-            return False
+            return switched
         queued_text = extract_text_after_trigger_word(
             text,
             auto_trigger_word,
             auto_trigger_aliases,
         )
         if queued_text is None:
-            print(f"[auto] probe did not hear '{auto_trigger_word}'.")
+            if audio_debug_enabled(config):
+                print(f"[auto] probe did not hear '{auto_trigger_word}'.")
             return False
         return click_auto_trigger_target(source="probe")
 
@@ -8686,11 +8783,14 @@ def main():
                         )
                         last_voice_sample = frame_end
                         print(
-                            "[auto] speech detected; listening for "
-                            f"'{auto_trigger_word}' until "
-                            f"{auto_trigger_silence_seconds:.1f}s of silence..."
+                            "[voice][LISTENING] Speech detected - keep speaking. "
+                            f"Processing starts after {auto_trigger_silence_seconds:.1f}s "
+                            "with no detected speech; new speech resets the timer."
                         )
-                        next_probe_sample = frame_end + min_probe_samples
+                        if auto_trigger_max_probes == 0:
+                            next_probe_sample = None
+                        else:
+                            next_probe_sample = frame_end + min_probe_samples
                 else:
                     if has_voice:
                         last_voice_sample = frame_end
@@ -8710,10 +8810,14 @@ def main():
                             probe_count,
                         )
                         probe_count += 1
-                        next_probe_sample = frame_end + probe_samples
-                    if (
-                        last_voice_sample is not None
-                        and frame_end - last_voice_sample >= silence_samples
+                        if probe_count >= auto_trigger_max_probes:
+                            next_probe_sample = None
+                        else:
+                            next_probe_sample = frame_end + probe_samples
+                    if auto_silence_timeout_reached(
+                        frame_end,
+                        last_voice_sample,
+                        silence_samples,
                     ):
                         samples, _ = recorder.get_samples_since(
                             utterance_start_sample
@@ -8892,22 +8996,28 @@ def main():
         print_auto_waiting()
 
     def run_auto_loop():
+        ready_signaled = False
         start_auto_pause_listener()
         print(
-            "[auto] listening in background. Point the mouse at the target "
-            "field and start speaking; press Ctrl+C to exit."
+            "[voice][LOADING] Models loaded. Starting the microphone...",
+            flush=True,
         )
         print(
-            "[auto] "
-            f"start={auto_start_speech_ms:.0f}ms "
-            f"vad={'sherpa' if auto_vad_detector is not None else 'rms'} "
-            f"trigger='{auto_trigger_word}' "
-            f"silence={auto_trigger_silence_seconds:.1f}s "
-            f"arm_timeout={auto_trigger_arm_timeout_seconds:.1f}s "
-            f"threshold={auto_vad_threshold:.4f}"
+            "[voice][CONFIG] "
+            f"STT={transcribe_backend}; "
+            f"VAD={'sherpa' if auto_vad_detector is not None else 'rms'}; "
+            f"end after {auto_trigger_silence_seconds:.1f}s without speech."
         )
-        if auto_shell_commands:
-            print_auto_waiting()
+        if audio_debug_enabled(config):
+            print(
+                "[voice][DEBUG] "
+                f"start={auto_start_speech_ms:.0f}ms "
+                f"trigger='{auto_trigger_word}' "
+                f"max_probes={auto_trigger_max_probes} "
+                f"arm_timeout={auto_trigger_arm_timeout_seconds:.1f}s "
+                f"threshold={auto_vad_threshold:.4f}"
+            )
+        if auto_shell_commands and audio_debug_enabled(config):
             labels = sorted(
                 {
                     command["label"]
@@ -8928,13 +9038,22 @@ def main():
             trigger_clicked = False
             try:
                 recording_id = recorder.start()
+                if not ready_signaled:
+                    signal_voice_ready(
+                        run_mode,
+                        transcribe_backend,
+                        _transcribe_model_label,
+                    )
+                    ready_signaled = True
+                    print_auto_waiting()
                 result = wait_for_auto_utterance()
                 if result is not None:
                     samples, trigger_clicked = result
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
-                print(f"[auto] recording failed: {exc}", file=sys.stderr)
+                ready_signaled = False
+                print(f"[voice][ERROR] Microphone recording failed: {exc}", file=sys.stderr)
                 time.sleep(1.0)
                 continue
             finally:
@@ -8946,7 +9065,12 @@ def main():
                 continue
             if samples.size == 0:
                 print("[auto] no audio captured.")
+                print_auto_waiting()
                 continue
+            print(
+                "[voice][PROCESSING] Silence detected - transcribing now...",
+                flush=True,
+            )
             transcribe_and_paste_auto(samples, trigger_clicked=trigger_clicked)
 
     if run_mode == "auto":
@@ -8956,6 +9080,7 @@ def main():
             print("\n[auto] stopped.")
         return
 
+    signal_voice_ready(run_mode, transcribe_backend, _transcribe_model_label)
     print(
         f"Hold '{hotkey_display}' to record, release to transcribe. "
         "Press Ctrl+C to exit."

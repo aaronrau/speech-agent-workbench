@@ -1,4 +1,5 @@
 {
+  "audio_debug": false,
   "auto_max_utterance_seconds": 90.0,
   "auto_pause_hotkey": "ctrl",
   "auto_poll_seconds": 0.05,
@@ -17,9 +18,10 @@
   ],
   "auto_trigger_arm_timeout_seconds": 8.0,
   "auto_trigger_min_probe_seconds": 1.0,
+  "auto_trigger_max_probes": 4,
   "auto_trigger_probe_seconds": 0.5,
   "auto_trigger_probe_window_seconds": 1.5,
-  "auto_trigger_silence_seconds": 3.0,
+  "auto_trigger_silence_seconds": 2.0,
   "auto_trigger_word": "agent",
   "auto_enable_terminate_commands": true,
   "auto_tmux_terminate_words": [
@@ -93,7 +95,9 @@
   "transcript_correction_llama_cpp_server_url": "http://127.0.0.1:18087",
   "transcript_correction_llama_cpp_server_autostart": true,
   "transcript_correction_llama_cpp_server_startup_timeout": 60.0,
-  "transcript_correction_llama_cpp_model": "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q8_0.gguf",
+  "transcript_correction_llama_cpp_model": "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_0.gguf",
+  "transcript_correction_llama_cpp_model_download": true,
+  "transcript_correction_llama_cpp_model_repo": "ggml-org/gemma-4-E2B-it-GGUF",
   "transcript_correction_llama_cpp_gpu_layers": 99,
   "transcript_correction_llama_cpp_timeout": 20.0,
   "transcribe_request_timeout": 120,
