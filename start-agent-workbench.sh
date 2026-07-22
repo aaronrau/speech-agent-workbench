@@ -1,8 +1,24 @@
 #!/bin/bash
 set -euo pipefail
 
-export PATH="${PATH:+$PATH:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ "${VOICE_WORKBENCH_PLATFORM_DISPATCHED:-0}" != "1" ]]; then
+  case "${VOICE_PLATFORM_OVERRIDE:-$(uname -s)}" in
+    Linux)
+      exec "$ROOT/scripts/linux/start-agent-workbench.sh" "$@"
+      ;;
+    Darwin)
+      exec "$ROOT/scripts/macos/start-agent-workbench.sh" "$@"
+      ;;
+    *)
+      echo "Unsupported operating system: ${VOICE_PLATFORM_OVERRIDE:-$(uname -s)}" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin${PATH:+:$PATH}:/usr/sbin:/usr/bin:/sbin:/bin"
 CONFIG_PATH="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
 
 SESSION_NAME="${SESSION_NAME:-}"
@@ -71,10 +87,22 @@ for arg in "$@"; do
       ;;
   esac
 done
-set -- "${args[@]}"
+if (( ${#args[@]} )); then
+  set -- "${args[@]}"
+else
+  set --
+fi
+
+to_lower() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
 
 if ! command -v tmux >/dev/null 2>&1; then
-  echo "tmux is not installed. Install it with: sudo apt-get install -y tmux" >&2
+  if [[ "${VOICE_PLATFORM:-linux}" == "macos" ]]; then
+    echo "tmux is not installed. Install it with: brew install tmux" >&2
+  else
+    echo "tmux is not installed. Install it with: sudo apt-get install -y tmux" >&2
+  fi
   exit 1
 fi
 
@@ -212,7 +240,7 @@ prompt_value() {
 
 normalize_spoken_name() {
   local name="$1"
-  name="${name,,}"
+  name="$(to_lower "$name")"
   name="${name//[^a-z0-9]/ }"
   name="${name#"${name%%[![:space:]]*}"}"
   name="${name%"${name##*[![:space:]]}"}"
@@ -310,6 +338,15 @@ agent_launch_command() {
     "$name" "$AUTO_COMPLETION_LOG" "$signal_command" "$AGENT_COMMAND"
 }
 
+pane_command_is_shell() {
+  case "$(to_lower "${1##*/}")" in
+    bash|dash|fish|ksh|sh|zsh)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 start_agent_panes() {
   local agent1_pane
   local agent2_pane
@@ -327,7 +364,7 @@ start_agent_panes() {
     agent1_pane="$(tmux display-message -p -t "$SESSION_NAME:$PANES_WINDOW.0" '#{pane_id}')"
     tmux select-pane -t "$agent1_pane" -T "$AGENT1_NAME"
     tmux set-option -pt "$agent1_pane" @agent_name "$AGENT1_NAME"
-    if [[ "$(tmux display-message -p -t "$agent1_pane" '#{pane_current_command}')" == "bash" ]]; then
+    if pane_command_is_shell "$(tmux display-message -p -t "$agent1_pane" '#{pane_current_command}')"; then
       tmux send-keys -t "$agent1_pane" "$(agent_launch_command "$AGENT1_NAME")" C-m
     fi
   fi
@@ -401,17 +438,17 @@ default_switches() {
 }
 
 auto_stt_command() {
-  printf 'VOICE_HOTKEY_CONFIG=%q VOICE_READY_FILE=%q VOICE_CONFIG_PROMPT=0 VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_FOCUS_LOG=%q VOICE_AUTO_TMUX_CONSOLE_LOG=%q VOICE_AUTO_TMUX_CONSOLE_REPLAY=1 VOICE_AGENT_COMPLETION_LOG=%q VOICE_DISABLE_STT=%q /bin/bash %q' \
+  printf 'VOICE_HOTKEY_CONFIG=%q VOICE_READY_FILE=%q VOICE_CONFIG_PROMPT=0 VOICE_AUTO_START_AGENT_WORKBENCH=0 VOICE_AUTO_TMUX_SESSION=%q VOICE_AUTO_FOCUS_LOG=%q VOICE_AUTO_TMUX_CONSOLE_LOG=%q VOICE_AUTO_TMUX_CONSOLE_REPLAY=1 VOICE_AGENT_COMPLETION_LOG=%q VOICE_DISABLE_STT=%q %q' \
     "$CONFIG_PATH" "$AUTO_READY_FILE" "$SESSION_NAME" "$AUTO_FOCUS_LOG" "$AUTO_CONSOLE_LOG" "$AUTO_COMPLETION_LOG" "${VOICE_DISABLE_STT:-0}" "$ROOT/run-auto.sh"
 }
 
 tmux_console_pipe_enabled() {
-  case "${AUTO_CONSOLE_PIPE,,}" in
+  case "$(to_lower "$AUTO_CONSOLE_PIPE")" in
     ""|0|false|no|none|null|off)
       return 1
       ;;
   esac
-  case "${AUTO_CONSOLE_LOG,,}" in
+  case "$(to_lower "$AUTO_CONSOLE_LOG")" in
     ""|0|false|no|none|null|off)
       return 1
       ;;
@@ -445,7 +482,7 @@ get_window_pane() {
 }
 
 start_tmux_console_log() {
-  case "${AUTO_STT,,}" in
+  case "$(to_lower "$AUTO_STT")" in
     0|off|false|no)
       return
       ;;
@@ -493,7 +530,8 @@ process_is_running() {
 }
 
 auto_ready_timeout_seconds() {
-  local value="${AUTO_READY_TIMEOUT,,}"
+  local value
+  value="$(to_lower "$AUTO_READY_TIMEOUT")"
   case "$value" in
     ""|0|false|no|none|null|off)
       echo 0

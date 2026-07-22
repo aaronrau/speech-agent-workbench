@@ -163,6 +163,10 @@ TMUX_WEBHOOK_LAST_DETAIL_LINES_LOCK = threading.Lock()
 ALLOWED_TRANSCRIPT_SYMBOLS = {".", "+"}
 
 
+def is_macos():
+    return sys.platform == "darwin"
+
+
 def normalize_hotkey_name(name):
     if not name:
         return "right_shift"
@@ -4313,7 +4317,8 @@ def build_transcriber(
                     file=sys.stderr,
                 )
                 print(
-                    "[transcribe] install: sudo apt-get install -y ffmpeg",
+                    "[transcribe] install: "
+                    + ("brew install ffmpeg" if is_macos() else "sudo apt-get install -y ffmpeg"),
                     file=sys.stderr,
                 )
             whisper_device = get_whisper_device(config)
@@ -4363,7 +4368,8 @@ def build_transcriber(
                     file=sys.stderr,
                 )
                 print(
-                    "[transcribe] install: sudo apt-get install -y ffmpeg",
+                    "[transcribe] install: "
+                    + ("brew install ffmpeg" if is_macos() else "sudo apt-get install -y ffmpeg"),
                     file=sys.stderr,
                 )
             fw_device = get_faster_whisper_device(config)
@@ -6741,10 +6747,82 @@ def focus_gnome_terminal_favorite():
     return False
 
 
+def get_macos_terminal_application():
+    configured = os.environ.get("VOICE_AUTO_MACOS_TERMINAL_APP", "").strip()
+    if configured:
+        return configured
+
+    term_program = os.environ.get("TERM_PROGRAM", "").strip().lower()
+    applications = {
+        "apple_terminal": "Terminal",
+        "ghostty": "Ghostty",
+        "iterm.app": "iTerm",
+        "iterm2": "iTerm",
+        "vscode": "Visual Studio Code",
+        "warpterminal": "Warp",
+        "wezterm": "WezTerm",
+    }
+    return applications.get(term_program, "Terminal")
+
+
+def focus_macos_terminal_application():
+    application = get_macos_terminal_application()
+    if not shutil.which("open"):
+        append_auto_focus_log(
+            "focus-macos-app",
+            application=application,
+            error="open-not-found",
+            success=False,
+        )
+        return False
+    try:
+        result = run_command(["open", "-a", application], timeout=2.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        append_auto_focus_log(
+            "focus-macos-app",
+            application=application,
+            error=str(exc),
+            success=False,
+        )
+        return False
+    success = result.returncode == 0
+    append_auto_focus_log(
+        "focus-macos-app",
+        application=application,
+        returncode=result.returncode,
+        stderr=summarize_log_text(result.stderr),
+        stdout=summarize_log_text(result.stdout),
+        success=success,
+    )
+    if success:
+        delay = get_env_float(
+            "VOICE_AUTO_REFOCUS_DELAY",
+            AUTO_REFOCUS_DELAY_DEFAULT,
+            minimum=0.0,
+        )
+        if delay:
+            time.sleep(delay)
+    return success
+
+
 def focus_auto_terminal_window():
     if not get_env_flag("VOICE_AUTO_REFOCUS_TERMINAL", default=True):
         append_auto_focus_log("focus-disabled", reason="VOICE_AUTO_REFOCUS_TERMINAL")
         return False
+
+    if is_macos():
+        append_auto_focus_log(
+            "focus-start",
+            platform="macos",
+            terminal_application=get_macos_terminal_application(),
+        )
+        focused = focus_macos_terminal_application()
+        append_auto_focus_log(
+            "focus-result",
+            method="macos-application",
+            success=focused,
+        )
+        return focused
 
     window_id = (
         os.environ.get("VOICE_AUTO_TERMINAL_WINDOW_ID")
@@ -7068,7 +7146,25 @@ def get_submit_enter_delay():
     return max(0.0, delay)
 
 
+def run_macos_osascript(statements, arguments=None, label="osascript"):
+    if not shutil.which("osascript"):
+        log_paste_debug("macos: osascript not found")
+        return False
+    argv = ["osascript"]
+    for statement in statements:
+        argv.extend(["-e", statement])
+    if arguments:
+        argv.append("--")
+        argv.extend(str(value) for value in arguments)
+    return run_command_checked(argv, label=label, timeout=2.0)
+
+
 def set_clipboard(text):
+    if is_macos() and shutil.which("pbcopy"):
+        log_paste_debug("clipboard: using pbcopy")
+        return run_command_checked(
+            ["pbcopy"], input_text=text, label="pbcopy", timeout=1.0
+        )
     if shutil.which("wl-copy"):
         log_paste_debug("clipboard: using wl-copy")
         return run_command_checked(
@@ -7092,6 +7188,12 @@ def set_clipboard(text):
 
 
 def paste_via_hotkey():
+    if is_macos():
+        log_paste_debug("hotkey: using macOS Command-V")
+        return run_macos_osascript(
+            ['tell application "System Events" to keystroke "v" using command down'],
+            label="macOS Command-V",
+        )
     if YDOTOOL_AVAILABLE and shutil.which("ydotool"):
         log_paste_debug("hotkey: using ydotool")
         return run_command_checked(
@@ -7115,6 +7217,19 @@ def paste_via_hotkey():
 
 
 def type_text(text):
+    if is_macos():
+        if text == "\n":
+            return press_enter()
+        log_paste_debug("type: using macOS System Events")
+        return run_macos_osascript(
+            [
+                "on run argv",
+                'tell application "System Events" to keystroke (item 1 of argv)',
+                "end run",
+            ],
+            arguments=[text],
+            label="macOS typing",
+        )
     if YDOTOOL_AVAILABLE and shutil.which("ydotool"):
         log_paste_debug("type: using ydotool")
         return run_command_checked(
@@ -7141,6 +7256,12 @@ def type_text_and_submit(text):
 
 
 def press_enter():
+    if is_macos():
+        log_paste_debug("enter: using macOS Return key")
+        return run_macos_osascript(
+            ['tell application "System Events" to key code 36'],
+            label="macOS Return",
+        )
     if WTYPE_AVAILABLE and shutil.which("wtype"):
         log_paste_debug("enter: using wtype")
         if run_command_checked(["wtype", "-k", "Return"], label="wtype"):
@@ -7168,6 +7289,8 @@ def paste_text(text):
     log_paste_debug(f"mode={mode} delay={delay}")
     log_paste_debug(
         "tools "
+        f"osascript={bool(shutil.which('osascript'))} "
+        f"pbcopy={bool(shutil.which('pbcopy'))} "
         f"wtype={bool(WTYPE_AVAILABLE and shutil.which('wtype'))} "
         f"ydotool={bool(YDOTOOL_AVAILABLE and shutil.which('ydotool'))} "
         f"xdotool={bool(shutil.which('xdotool'))} "
@@ -7467,6 +7590,16 @@ def run_auto_with_stt_disabled(config, run_mode):
 
 
 def click_mouse_left():
+    if is_macos():
+        log_paste_debug("click: using pynput on macOS")
+        try:
+            from pynput.mouse import Button, Controller
+
+            Controller().click(Button.left)
+            return True
+        except Exception as exc:
+            log_paste_debug(f"click: macOS pynput failed: {exc}")
+            return False
     if YDOTOOL_AVAILABLE and shutil.which("ydotool"):
         log_paste_debug("click: using ydotool")
         return run_command_checked(
@@ -7511,6 +7644,14 @@ def main():
             return
         run_auto_with_stt_disabled(config, run_mode)
         return
+    if is_macos():
+        print(
+            "[macos] Microphone permission is required for audio capture. "
+            "Accessibility and Input Monitoring may be required for desktop "
+            "automation and global hotkeys. Configure these for your terminal "
+            "under System Settings > Privacy & Security.",
+            flush=True,
+        )
     auto_pause_hotkey = (
         get_auto_pause_hotkey(config) if run_mode == "auto" else None
     )
@@ -7846,6 +7987,20 @@ def main():
             "[hotkey] unable to paste automatically.",
             file=sys.stderr,
         )
+        if is_macos():
+            print(
+                "[hotkey] allow your terminal app under System Settings > "
+                "Privacy & Security > Accessibility. Input Monitoring may "
+                "also be required for global hotkeys.",
+                file=sys.stderr,
+            )
+            if not shutil.which("pbcopy"):
+                print("[hotkey] macOS pbcopy was not found.", file=sys.stderr)
+            if not shutil.which("osascript"):
+                print("[hotkey] macOS osascript was not found.", file=sys.stderr)
+            print(text)
+            return
+
         session = os.environ.get("XDG_SESSION_TYPE", "").lower()
         is_wayland = session == "wayland" or os.environ.get(
             "WAYLAND_DISPLAY"

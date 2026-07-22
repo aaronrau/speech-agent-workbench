@@ -1,6 +1,6 @@
 # speech-agent-workbench
 
-Voice control for Linux agent workspaces: speak a command, route it to the right tmux agent, and submit it without touching the keyboard.
+Voice control for Linux and macOS agent workspaces: speak a command, route it to the right tmux agent, and submit it without touching the keyboard.
 
 ## Project Status
 
@@ -23,6 +23,7 @@ it as a fun local script for trying ideas quickly.
 - Optional remote STT auto-detection with local Parakeet ONNX fallback.
 - Sherpa/Silero VAD support for automatic speech detection.
 - X11 and Wayland typing support through `xdotool`/`xclip`, `wtype`, `wl-clipboard`, or `ydotool`.
+- Native macOS clipboard, Command-V, Return-key, mouse-click, and terminal-focus support through `pbcopy`, AppleScript, and `pynput`.
 - Direct tmux send mode for agent-prefixed messages, so routed commands do not depend on desktop focus.
 - Optional Gemma GGUF transcript correction through llama.cpp, with fast built-in cleanup for common Codex/tmux/GitHub STT mistakes.
 - Focus and tmux-send diagnostics are written to a configurable log file.
@@ -33,7 +34,58 @@ it as a fun local script for trying ideas quickly.
 ./install.sh
 ```
 
-The installer creates `.venv`, installs Python dependencies, installs common Ubuntu packages when `apt-get` is available, and creates `config.json` from `config.example.json`.
+The installer detects Linux or macOS, creates `.venv`, installs the matching
+system and Python dependencies (including `llama-cli` and `llama-server`),
+creates `config.json` from `config.example.json`, and downloads and validates
+the default Parakeet ONNX STT model. The public launch commands perform the
+same OS detection and preserve their existing arguments and environment
+overrides.
+
+The Parakeet files are stored in the normal Hugging Face cache. Set
+`VOICE_INSTALL_STT_MODEL=0` to skip the model prefetch, or
+`VOICE_INSTALL_LLAMA_CPP=0` to skip llama.cpp when those assets are managed
+separately.
+
+### Linux
+
+On Debian/Ubuntu, `install.sh` installs packages with `apt-get`. The existing
+X11 and Wayland integrations remain the default Linux implementations. When a
+system llama.cpp package is not already available, the installer builds
+`llama-cli` and `llama-server` under the ignored `models/llama.cpp` directory
+and exposes them through `.venv/bin`.
+
+### macOS
+
+Install [Homebrew](https://brew.sh/) first, then run the normal installer:
+
+```bash
+./install.sh
+```
+
+The macOS installer supports Apple Silicon and Intel Homebrew locations and
+installs/checks Python 3.10+, tmux, ffmpeg, PortAudio, and llama.cpp. It installs
+the minimal Parakeet ONNX/Sherpa runtime and prefetches Parakeet by default. To
+install every optional STT backend, use:
+
+```bash
+VOICE_INSTALL_FULL_REQUIREMENTS=1 ./install.sh
+```
+
+On first use, macOS may ask for privacy permissions for the terminal app that
+launched the workbench. Enable these under **System Settings → Privacy &
+Security**:
+
+- **Microphone** for audio capture.
+- **Accessibility** for paste, Return, focus, and mouse automation.
+- **Input Monitoring** for global hotkeys when macOS requires it.
+
+The launcher detects Terminal, iTerm, Warp, WezTerm, Ghostty, and VS Code from
+`TERM_PROGRAM`. Override the focus target when needed with
+`VOICE_AUTO_MACOS_TERMINAL_APP`, for example:
+
+```bash
+VOICE_AUTO_MACOS_TERMINAL_APP=Ghostty ./run-auto.sh
+```
 
 To skip system packages:
 
@@ -332,6 +384,9 @@ header and `VOICE_TMUX_SUMMARY_WEBHOOK_TIMEOUT` to tune the POST timeout.
 
 ## Notes
 
+- macOS clipboard/paste uses `pbcopy` and Command-V through AppleScript.
+- macOS desktop automation requires Accessibility permission for the terminal
+  application running the workbench.
 - X11 typing uses `xdotool`/`xclip`.
 - Wayland typing uses `wtype`, `wl-clipboard`, or `ydotool`.
 - If direct typing fails, set `VOICE_PASTE_MODE=clipboard`.

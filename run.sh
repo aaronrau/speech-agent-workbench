@@ -1,9 +1,25 @@
 #!/bin/bash
 set -euo pipefail
 
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ "${VOICE_RUN_PLATFORM_DISPATCHED:-0}" != "1" ]]; then
+  case "${VOICE_PLATFORM_OVERRIDE:-$(uname -s)}" in
+    Linux)
+      exec "$ROOT/scripts/linux/run.sh" "$@"
+      ;;
+    Darwin)
+      exec "$ROOT/scripts/macos/run.sh" "$@"
+      ;;
+    *)
+      echo "Unsupported operating system: ${VOICE_PLATFORM_OVERRIDE:-$(uname -s)}" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 VENV_ROOT="${VOICE_VENV:-$ROOT/.venv}"
+export PATH="$VENV_ROOT/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 PYTHON_BIN="$VENV_ROOT/bin/python"
 VAD_MODEL="${VOICE_AUTO_SHERPA_VAD_MODEL:-$ROOT/models/silero_vad.onnx}"
 VAD_URL="${VOICE_AUTO_SHERPA_VAD_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx}"
@@ -21,7 +37,11 @@ for arg in "$@"; do
       ;;
   esac
 done
-set -- "${args[@]}"
+if (( ${#args[@]} )); then
+  set -- "${args[@]}"
+else
+  set --
+fi
 
 export PYTHONUNBUFFERED=1
 export VOICE_HOTKEY_CONFIG="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
@@ -41,6 +61,10 @@ export VOICE_AUTO_SHERPA_VAD_MODEL="$VAD_MODEL"
 
 is_wayland() {
   [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = "wayland" ]
+}
+
+to_lower() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
 }
 
 check_ydotoold() {
@@ -79,6 +103,13 @@ check_ydotoold() {
 ensure_python_env() {
   local install_requirements=0
 
+  if [[ -x "$PYTHON_BIN" ]] && ! "$PYTHON_BIN" -c 'import sys' >/dev/null 2>&1; then
+    echo "[run] Python venv is incompatible with this platform: $VENV_ROOT" >&2
+    echo "[run] repairing it with the selected python3 interpreter..." >&2
+    python3 -m venv --clear "$VENV_ROOT"
+    install_requirements=1
+  fi
+
   if [[ ! -x "$PYTHON_BIN" ]]; then
     case "${VOICE_CREATE_VENV:-1}" in
       0|false|no|none|null|off)
@@ -89,14 +120,18 @@ ensure_python_env() {
     esac
 
     if ! command -v python3 >/dev/null 2>&1; then
-      echo "[run] python3 not found. Install Python 3.9+ and retry." >&2
+      echo "[run] python3 not found. Install Python 3.10+ and retry." >&2
       exit 1
     fi
 
     echo "[run] creating Python venv: $VENV_ROOT" >&2
     if ! python3 -m venv "$VENV_ROOT"; then
-      echo "[run] unable to create venv. On Ubuntu, install python3-venv:" >&2
-      echo "[run]   sudo apt-get install -y python3-venv" >&2
+      if [[ "${VOICE_PLATFORM:-linux}" == "macos" ]]; then
+        echo "[run] unable to create venv. Install Python with: brew install python" >&2
+      else
+        echo "[run] unable to create venv. On Ubuntu, install python3-venv:" >&2
+        echo "[run]   sudo apt-get install -y python3-venv" >&2
+      fi
       exit 1
     fi
     install_requirements=1
@@ -324,7 +359,7 @@ select_default_transcribe_backend() {
     return 0
   fi
 
-  case "${VOICE_DEFAULT_TRANSCRIBE_BACKEND,,}" in
+  case "$(to_lower "$VOICE_DEFAULT_TRANSCRIBE_BACKEND")" in
     ""|0|false|no|none|null|off)
       return 0
       ;;
@@ -355,7 +390,7 @@ PY
       ;;
   esac
 
-  case "${VOICE_DEFAULT_TRANSCRIBE_BACKEND,,}" in
+  case "$(to_lower "$VOICE_DEFAULT_TRANSCRIBE_BACKEND")" in
     parakey|parakeet)
       export VOICE_TRANSCRIBE_BACKEND="parakeet-onnx"
       ;;
@@ -370,7 +405,7 @@ log_backend_fallback() {
   if [ -z "${VOICE_FALLBACK_BACKEND:-}" ]; then
     return 0
   fi
-  case "${VOICE_FALLBACK_BACKEND,,}" in
+  case "$(to_lower "$VOICE_FALLBACK_BACKEND")" in
     0|false|no|none|null|off)
       echo "[run] backend fallback disabled." >&2
       ;;

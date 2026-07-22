@@ -1720,9 +1720,10 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 },
                 clear=True,
             ):
-                with mock.patch.object(app.shutil, "which", side_effect=fake_which):
-                    with mock.patch.object(app, "run_command", side_effect=fake_run_command):
-                        self.assertFalse(app.focus_auto_terminal_window())
+                with mock.patch.object(app, "is_macos", return_value=False):
+                    with mock.patch.object(app.shutil, "which", side_effect=fake_which):
+                        with mock.patch.object(app, "run_command", side_effect=fake_run_command):
+                            self.assertFalse(app.focus_auto_terminal_window())
 
             with open(log_path, "r", encoding="utf-8") as handle:
                 records = [json.loads(line) for line in handle]
@@ -1763,9 +1764,10 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 },
                 clear=True,
             ):
-                with mock.patch.object(app.shutil, "which", side_effect=fake_which):
-                    with mock.patch.object(app, "run_command", side_effect=fake_run_command):
-                        self.assertTrue(app.focus_auto_terminal_window())
+                with mock.patch.object(app, "is_macos", return_value=False):
+                    with mock.patch.object(app.shutil, "which", side_effect=fake_which):
+                        with mock.patch.object(app, "run_command", side_effect=fake_run_command):
+                            self.assertTrue(app.focus_auto_terminal_window())
 
             with open(log_path, "r", encoding="utf-8") as handle:
                 records = [json.loads(line) for line in handle]

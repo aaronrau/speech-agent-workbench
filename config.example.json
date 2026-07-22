@@ -64,6 +64,8 @@
   "paste_debug": false,
   "paste_delay": 0.1,
   "paste_mode": "type",
+  "parakeet_onnx_model": "istupakov/parakeet-tdt-0.6b-v3-onnx",
+  "parakeet_onnx_quantization": "int8",
   "remote_url": "http://127.0.0.1:8765/transcribe",
   "remote_wait_interval": 0.5,
   "remote_wait_timeout": 300,

@@ -1,11 +1,14 @@
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
 import unittest
+import uuid
 
 
+@unittest.skipUnless(shutil.which("tmux"), "real tmux is not installed")
 class WorkbenchConfigTests(unittest.TestCase):
     def write_executable(self, directory, name, content):
         path = os.path.join(directory, name)
@@ -23,30 +26,12 @@ class WorkbenchConfigTests(unittest.TestCase):
         )
         return path
 
-    def write_fake_tmux(self, directory):
-        return self.write_executable(
-            directory,
-            "tmux",
-            """#!/usr/bin/env bash
-case "$1" in
-  has-session)
-    exit 1
-    ;;
-  list-panes|list-windows)
-    exit 0
-    ;;
-  display-message)
-    case "$*" in
-      *pane_current_command*) echo bash ;;
-      *) echo %1 ;;
-    esac
-    ;;
-  split-window)
-    echo %2
-    ;;
-esac
-exit 0
-""",
+    def cleanup_tmux_session(self, session_name):
+        subprocess.run(
+            ["tmux", "kill-session", "-t", session_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
         )
 
     def test_start_workbench_migrates_legacy_codex_agents_config(self):
@@ -61,7 +46,6 @@ exit 0
             for path in (agent1_dir, agent2_dir, agent3_dir, voice_dir):
                 os.makedirs(path)
 
-            self.write_fake_tmux(fake_bin)
             self.write_executable(
                 fake_bin,
                 "agent-cli",
@@ -69,11 +53,13 @@ exit 0
             )
 
             config_path = os.path.join(tmp_dir, "config.json")
+            session_name = "legacy-" + uuid.uuid4().hex[:12]
+            self.addCleanup(self.cleanup_tmux_session, session_name)
             with open(config_path, "w", encoding="utf-8") as handle:
                 json.dump(
                     {
                         "codex_agents": {
-                            "session_name": "legacy-session",
+                            "session_name": session_name,
                             "layout": "panes",
                             "panes_window": "LegacyPanes",
                             "codex_command": "agent-cli",
@@ -123,7 +109,7 @@ exit 0
             self.assertEqual(
                 config["agent_workbench"],
                 {
-                    "session_name": "legacy-session",
+                    "session_name": session_name,
                     "layout": "panes",
                     "panes_window": "LegacyPanes",
                     "agent_command": "agent-cli",
@@ -152,12 +138,13 @@ exit 0
             for path in (agent1_dir, agent2_dir, agent3_dir, voice_dir):
                 os.makedirs(path)
 
-            self.write_fake_tmux(fake_bin)
             self.write_executable(fake_bin, "agent-cli", "#!/usr/bin/env bash\nexit 0\n")
 
             config_path = os.path.join(tmp_dir, "config.json")
+            session_name = "alias-" + uuid.uuid4().hex[:12]
+            self.addCleanup(self.cleanup_tmux_session, session_name)
             workbench_config = {
-                "session_name": "alias-session",
+                "session_name": session_name,
                 "layout": "panes",
                 "panes_window": "AliasPanes",
                 "agent_command": "agent-cli",

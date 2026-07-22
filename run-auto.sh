@@ -1,32 +1,47 @@
 #!/bin/bash
 set -euo pipefail
 
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ "${VOICE_RUN_AUTO_PLATFORM_DISPATCHED:-0}" != "1" ]]; then
+  case "${VOICE_PLATFORM_OVERRIDE:-$(uname -s)}" in
+    Linux)
+      exec "$ROOT/scripts/linux/run-auto.sh" "$@"
+      ;;
+    Darwin)
+      exec "$ROOT/scripts/macos/run-auto.sh" "$@"
+      ;;
+    *)
+      echo "Unsupported operating system: ${VOICE_PLATFORM_OVERRIDE:-$(uname -s)}" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 load_local_env() {
   local env_file="$ROOT/.env"
   [[ -f "$env_file" ]] || return 0
 
-  local key
-  local -A existing_values=()
-  while IFS= read -r key; do
-    if [[ -v "$key" ]]; then
-      existing_values["$key"]="${!key}"
-    fi
-  done < <(
-    sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p' "$env_file"
-  )
+  local env_snapshot
+  env_snapshot="$(mktemp "${TMPDIR:-/tmp}/speech-agent-workbench-env.XXXXXX")"
+  export -p >"$env_snapshot"
 
   set -a
   # shellcheck disable=SC1091
-  source "$env_file"
+  if ! source "$env_file"; then
+    set +a
+    rm -f "$env_snapshot"
+    return 1
+  fi
   set +a
 
-  for key in "${!existing_values[@]}"; do
-    printf -v "$key" '%s' "${existing_values[$key]}"
-    export "$key"
-  done
+  # Restore variables inherited from the caller so explicit shell values keep
+  # precedence while values introduced only by .env remain available.
+  # shellcheck disable=SC1090
+  source "$env_snapshot"
+  rm -f "$env_snapshot"
 }
 
 load_local_env
@@ -49,7 +64,15 @@ for arg in "$@"; do
       ;;
   esac
 done
-set -- "${args[@]}"
+if (( ${#args[@]} )); then
+  set -- "${args[@]}"
+else
+  set --
+fi
+
+to_lower() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
 
 load_auto_config_defaults() {
   python3 - "$CONFIG_PATH" "$ROOT" <<'PY'
@@ -116,7 +139,7 @@ eval "$(load_auto_config_defaults)"
 
 normalize_spoken_name() {
   local name="$1"
-  name="${name,,}"
+  name="$(to_lower "$name")"
   name="${name//[^a-z0-9]/ }"
   name="${name#"${name%%[![:space:]]*}"}"
   name="${name%"${name##*[![:space:]]}"}"
@@ -188,7 +211,7 @@ terminate_words_for_voice() {
 
 auto_terminate_enabled() {
   local value="${VOICE_AUTO_ENABLE_TERMINATE_COMMANDS:-${CONFIG_ENABLE_TERMINATE_COMMANDS:-0}}"
-  case "${value,,}" in
+  case "$(to_lower "$value")" in
     1|true|yes|on)
       return 0
       ;;
