@@ -62,6 +62,29 @@ class PlatformLauncherTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    def test_installer_fails_when_tmux_is_missing_after_package_stage(self):
+        env = os.environ.copy()
+        env.update(
+            {
+                "INSTALL_SYSTEM_DEPS": "0",
+                "PATH": "/usr/bin:/bin",
+                "VOICE_INSTALL_PLATFORM_DISPATCHED": "1",
+                "VOICE_PLATFORM": "macos",
+            }
+        )
+        result = subprocess.run(
+            ["/bin/bash", os.path.join(self.repo_root, "install.sh")],
+            cwd=self.repo_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("tmux is missing", result.stderr)
+        self.assertIn("brew install tmux", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

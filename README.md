@@ -39,7 +39,8 @@ system and Python dependencies (including `llama-cli` and `llama-server`),
 creates `config.json` from `config.example.json`, and downloads and validates
 the default Parakeet ONNX STT model. The public launch commands perform the
 same OS detection and preserve their existing arguments and environment
-overrides.
+overrides. Installation fails with a platform-specific recovery command if
+`tmux` is not executable after the system-package stage.
 
 The Parakeet files are stored in the normal Hugging Face cache. Set
 `VOICE_INSTALL_STT_MODEL=0` to skip the model prefetch, or

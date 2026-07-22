@@ -80,6 +80,26 @@ EOF
   fi
 }
 
+ensure_tmux() {
+  if command -v tmux >/dev/null 2>&1; then
+    echo "[install] tmux ready: $(command -v tmux) ($(tmux -V))"
+    return 0
+  fi
+
+  if [[ "${INSTALL_SYSTEM_DEPS:-1}" == "0" ]]; then
+    echo "tmux is missing and INSTALL_SYSTEM_DEPS=0 skipped its installation." >&2
+  else
+    echo "tmux installation completed without providing an executable on PATH." >&2
+  fi
+
+  if [[ "${VOICE_PLATFORM:-linux}" == "macos" ]]; then
+    echo "Install it with 'brew install tmux' and retry." >&2
+  else
+    echo "Install it with 'sudo apt-get install -y tmux' and retry." >&2
+  fi
+  return 1
+}
+
 llama_cpp_ready() {
   command -v llama-cli >/dev/null 2>&1 && command -v llama-server >/dev/null 2>&1
 }
@@ -160,6 +180,7 @@ install_stt_model() {
 if [[ "${INSTALL_SYSTEM_DEPS:-1}" != "0" ]]; then
   install_system_deps
 fi
+ensure_tmux
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 not found. Install Python 3.10+ and retry." >&2
