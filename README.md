@@ -16,7 +16,7 @@ it as a fun local script for trying ideas quickly.
 - Per-agent clear command: say `<agent name> clear terminal` to send `/clear` to that agent's tmux terminal.
 - Configurable agent names, working directories, pane/window layout, voice pane name, trigger word, aliases, paste mode, and input devices.
 - Numeric pane names get spoken-number aliases, so a name containing `2` can be addressed as `two`.
-- Optional voice session shutdown commands, disabled by default.
+- Exact-phrase voice session shutdown commands, enabled by default.
 - Default local STT uses Parakeet ONNX through `onnx-asr`.
 - First-run startup creates `.venv`, installs Python requirements, checks model downloads, logs the Hugging Face cache path, and preloads Parakeet ONNX before listening starts.
 - The workbench launcher waits for STT/VAD models to finish loading before reporting the voice listener ready.
@@ -88,6 +88,11 @@ The launcher detects Terminal, iTerm, Warp, WezTerm, Ghostty, and VS Code from
 VOICE_AUTO_MACOS_TERMINAL_APP=Ghostty ./run-auto.sh
 ```
 
+On an interactive macOS workbench launch, the launcher lists the available
+Core Audio inputs and offers to remap the pause/resume key before tmux starts.
+Both selections are saved in `config.json`; set
+`VOICE_MACOS_INPUT_PROMPT=0` to skip these prompts.
+
 To skip system packages:
 
 ```bash
@@ -109,7 +114,8 @@ Important fields:
 - `sherpa_model_dir`: included Parakeet ONNX model directory
 - `auto_trigger_word`: default is `agent`
 - `auto_trigger_aliases`: defaults include `codex`, `code x`, and `condex`
-- `auto_enable_terminate_commands`: default is `false`
+- `auto_trigger_silence_seconds`: defaults to `3.0` seconds before an utterance ends
+- `auto_enable_terminate_commands`: defaults to `true`; set it to `false` for a persistent API
 - `transcript_correction_backend`: set to `llama-cpp` for model cleanup
 - `transcript_correction_llama_cpp_model`: GGUF model path for llama.cpp cleanup
 - `paste_mode`: `type`, `clipboard`, `hotkey`, or `auto`
@@ -167,11 +173,10 @@ Every configured tmux switch target also gets an exact clear command. Say
 `/clear`, and presses Enter. The clear phrase is not treated as a normal
 agent-prefixed prompt message.
 
-### Optional Terminate Command
+### Terminate Command
 
-Voice commands that kill the tmux workbench are disabled by default because STT
-can mishear short greetings or filler words. To opt in, use an explicit phrase
-in your local `config.json`:
+Voice commands that kill the tmux workbench are enabled by default with the
+exact phrase `Wolf terminate session`. To customize the phrase, use:
 
 ```json
 {
@@ -181,6 +186,9 @@ in your local `config.json`:
   ]
 }
 ```
+
+Set `auto_enable_terminate_commands` to `false` to disable termination. The
+Agent Audio Pipe environment template does this so its API remains available.
 
 Terminate commands require an exact phrase match and are not used for
 agent-prefixed message routing. `terminate session`, `terminates session`,
@@ -271,7 +279,10 @@ Wolf and agent-pane output to `speech-agent-workbench-auto.log` and
 the two example tokens if the Agent Audio Pipe configuration uses different
 values.
 
-On interactive launch, the workbench script shows the saved agent command, pane names, and paths. Accept the defaults or update them. The values are saved in `config.json`.
+On interactive launch, the workbench script shows the saved agent command,
+pane names, and paths. The default names are `Flux`, `Brock`, `Pike`, and the
+`Wolf` voice pane. Accept the defaults or update them. The values are saved in
+`config.json`.
 When launched through `./run-auto.sh`, model downloads and enabled
 transcript-correction assets are checked in the foreground before tmux starts so
 download/cache logs are visible. Set `VOICE_AUTO_PREFETCH_MODELS=off` to skip

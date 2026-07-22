@@ -19,10 +19,12 @@
   "auto_trigger_min_probe_seconds": 1.0,
   "auto_trigger_probe_seconds": 0.5,
   "auto_trigger_probe_window_seconds": 1.5,
-  "auto_trigger_silence_seconds": 2.0,
+  "auto_trigger_silence_seconds": 3.0,
   "auto_trigger_word": "agent",
-  "auto_enable_terminate_commands": false,
-  "auto_tmux_terminate_words": [],
+  "auto_enable_terminate_commands": true,
+  "auto_tmux_terminate_words": [
+    "Wolf terminate session"
+  ],
   "auto_tmux_console_log": null,
   "auto_tmux_console_idle_flush_seconds": 5.0,
   "auto_tmux_console_max_bytes": 1048576,

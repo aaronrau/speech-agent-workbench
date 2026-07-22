@@ -117,7 +117,7 @@ DEFAULT_CONFIG = {
     "auto_sherpa_vad_provider": "cpu",
     "auto_sherpa_vad_num_threads": 1,
     "auto_trigger_word": "agent",
-    "auto_trigger_silence_seconds": 2.0,
+    "auto_trigger_silence_seconds": 3.0,
     "auto_trigger_probe_seconds": 0.5,
     "auto_trigger_min_probe_seconds": 1.0,
     "auto_trigger_probe_window_seconds": 1.5,
@@ -125,8 +125,8 @@ DEFAULT_CONFIG = {
     "auto_trigger_aliases": ["codex", "code x", "condex"],
     "auto_tmux_switch_session": None,
     "auto_tmux_switch_words": {},
-    "auto_enable_terminate_commands": False,
-    "auto_tmux_terminate_words": [],
+    "auto_enable_terminate_commands": True,
+    "auto_tmux_terminate_words": ["Wolf terminate session"],
     "auto_tmux_console_log": None,
     "auto_tmux_console_replay": True,
     "auto_tmux_console_retention_seconds": 3600,
@@ -1921,6 +1921,39 @@ def prompt_for_hotkey(config_path, config, backend, step_label=None, device=None
 
         print(f"[hotkey] selected '{hotkey_name}'")
         config["hotkey"] = hotkey_name
+        save_config(config_path, config)
+        return hotkey_name
+
+
+def prompt_for_auto_pause_hotkey(config_path, config, step_label=None):
+    saved_hotkey = get_auto_pause_hotkey(config) or "ctrl"
+    if not sys.stdin.isatty() or not config_prompts_enabled():
+        print("[config] prompts disabled; using auto pause hotkey from config.")
+        return saved_hotkey
+
+    label = f"{step_label} " if step_label else ""
+    if not prompt_change_saved_value(
+        label, "saved pause/resume hotkey", f"'{saved_hotkey}'"
+    ):
+        return saved_hotkey
+
+    print(f"{label}Press the key you want to use to pause/resume listening:")
+    while True:
+        try:
+            hotkey_name = capture_hotkey_pynput()
+            if not hotkey_name:
+                print("Unable to read a key. Try again.")
+                continue
+            parse_auto_pause_hotkey_pynput(hotkey_name)
+        except ValueError as exc:
+            print(str(exc))
+            continue
+        except Exception as exc:
+            print(f"[hotkey] pynput backend unavailable: {exc}", file=sys.stderr)
+            return saved_hotkey
+
+        print(f"[hotkey] selected '{hotkey_name}' for pause/resume")
+        config["auto_pause_hotkey"] = hotkey_name
         save_config(config_path, config)
         return hotkey_name
 
@@ -7651,9 +7684,18 @@ def click_mouse_left():
 
 
 def main():
-    apply_runtime_cli_flags()
+    runtime_args = apply_runtime_cli_flags()
     config_path = os.environ.get("VOICE_HOTKEY_CONFIG", "config.json")
     config = load_config(config_path)
+    if "--configure-macos-inputs" in runtime_args:
+        prompt_for_device(config_path, config, step_label="Step 1/2:")
+        prompt_for_auto_pause_hotkey(
+            config_path, config, step_label="Step 2/2:"
+        )
+        return
+    if "--configure-audio-input" in runtime_args:
+        prompt_for_device(config_path, config)
+        return
     global PASTE_DEBUG_DEFAULT
     global PASTE_DELAY_DEFAULT
     global PASTE_MODE_DEFAULT
@@ -7863,7 +7905,7 @@ def main():
         config,
         "VOICE_AUTO_TRIGGER_SILENCE_SECONDS",
         "auto_trigger_silence_seconds",
-        2.0,
+        3.0,
         minimum=0.2,
     )
     auto_trigger_probe_seconds = get_config_float(

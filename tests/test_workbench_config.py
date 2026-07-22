@@ -7,6 +7,36 @@ import tempfile
 import unittest
 import uuid
 
+from app import DEFAULT_CONFIG
+
+
+class DefaultConfigTests(unittest.TestCase):
+    def test_example_keeps_voice_and_llm_correction_defaults(self):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(
+            os.path.join(repo_root, "config.example.json"),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            config = json.load(handle)
+
+        self.assertEqual(config["auto_trigger_silence_seconds"], 3.0)
+        self.assertEqual(
+            config["auto_trigger_silence_seconds"],
+            DEFAULT_CONFIG["auto_trigger_silence_seconds"],
+        )
+        self.assertEqual(
+            [agent["name"] for agent in config["agent_workbench"]["agents"]],
+            ["Flux", "Brock", "Pike"],
+        )
+        self.assertEqual(config["agent_workbench"]["voice"]["name"], "Wolf")
+        self.assertTrue(config["auto_enable_terminate_commands"])
+        self.assertEqual(
+            config["auto_tmux_terminate_words"], ["Wolf terminate session"]
+        )
+        self.assertTrue(config["transcript_correction_prompt"].strip())
+        self.assertTrue(config["transcript_correction_llama_cpp_model"].strip())
+
 
 @unittest.skipUnless(shutil.which("tmux"), "real tmux is not installed")
 class WorkbenchConfigTests(unittest.TestCase):
@@ -33,6 +63,53 @@ class WorkbenchConfigTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
             check=False,
         )
+
+    def test_start_workbench_uses_voice_friendly_names_without_config(self):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_bin = os.path.join(tmp_dir, "bin")
+            os.mkdir(fake_bin)
+            self.write_executable(
+                fake_bin, "agent-cli", "#!/usr/bin/env bash\nexit 0\n"
+            )
+
+            config_path = os.path.join(tmp_dir, "config.json")
+            session_name = "defaults-" + uuid.uuid4().hex[:12]
+            self.addCleanup(self.cleanup_tmux_session, session_name)
+            env = os.environ.copy()
+            env.update(
+                {
+                    "AGENT_COMMAND": "agent-cli",
+                    "AGENTS_CONFIG_PROMPT": "0",
+                    "ATTACH": "0",
+                    "AUTO_STT": "0",
+                    "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
+                    "SESSION_NAME": session_name,
+                    "VOICE_HOTKEY_CONFIG": config_path,
+                }
+            )
+            result = subprocess.run(
+                [os.path.join(repo_root, "start-agent-workbench.sh")],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+            with open(config_path, "r", encoding="utf-8") as handle:
+                workbench = json.load(handle)["agent_workbench"]
+
+            self.assertEqual(
+                [agent["name"] for agent in workbench["agents"]],
+                ["Flux", "Brock", "Pike"],
+            )
+            self.assertEqual(workbench["voice"]["name"], "Wolf")
 
     def test_start_workbench_migrates_legacy_codex_agents_config(self):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

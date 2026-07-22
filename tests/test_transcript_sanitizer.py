@@ -1513,12 +1513,13 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             )
         )
 
-    def test_auto_tmux_switch_commands_disable_terminate_commands_by_default(self):
+    def test_auto_tmux_switch_commands_can_disable_terminate_commands(self):
         with mock.patch.dict(
             "os.environ",
             {
                 "VOICE_AUTO_TMUX_SESSION": "speech-agent-workbench",
                 "VOICE_AUTO_TMUX_SWITCHES": "voice=pane:%4",
+                "VOICE_AUTO_ENABLE_TERMINATE_COMMANDS": "0",
                 "VOICE_AUTO_TMUX_TERMINATE_WORDS": "voice terminate session",
             },
             clear=True,

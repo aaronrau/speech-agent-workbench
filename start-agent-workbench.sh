@@ -120,11 +120,11 @@ defaults = {
     "panes_window": "Workbench",
     "agent_command": "codex --sandbox danger-full-access --ask-for-approval never",
     "agents": [
-        {"name": "Agent 1", "path": home},
-        {"name": "Agent 2", "path": home},
-        {"name": "Agent 3", "path": home},
+        {"name": "Flux", "path": home},
+        {"name": "Brock", "path": home},
+        {"name": "Pike", "path": home},
     ],
-    "voice": {"name": "Voice", "path": root},
+    "voice": {"name": "Wolf", "path": root},
 }
 try:
     with open(path, "r", encoding="utf-8") as handle:
@@ -554,6 +554,34 @@ stt_disabled() {
   return 1
 }
 
+configure_macos_inputs() {
+  if [[ "${VOICE_PLATFORM:-linux}" != "macos" || ! -t 0 ]] || stt_disabled; then
+    return
+  fi
+  case "$(to_lower "$AUTO_STT")" in
+    0|false|no|none|null|off)
+      return
+      ;;
+  esac
+  case "$(to_lower "${VOICE_MACOS_INPUT_PROMPT:-1}")" in
+    0|false|no|none|null|off)
+      return
+      ;;
+  esac
+
+  local input_python
+  input_python="${VOICE_VENV:-$ROOT/.venv}/bin/python"
+  if [[ ! -x "$input_python" ]]; then
+    echo "[agents] unable to configure macOS input; run ./install.sh first." >&2
+    return
+  fi
+
+  echo "[agents] configuring macOS audio and keyboard input..."
+  VOICE_CONFIG_PROMPT=1 \
+    VOICE_HOTKEY_CONFIG="$CONFIG_PATH" \
+    "$input_python" "$ROOT/app.py" --configure-macos-inputs
+}
+
 clear_auto_stt_ready() {
   if [[ -z "$AUTO_READY_FILE" ]]; then
     return
@@ -759,6 +787,7 @@ if [[ -t 0 && "${AGENTS_CONFIG_PROMPT:-1}" != "0" && "${AGENTS_CONFIG_PROMPT:-1}
 fi
 VOICE_WINDOW="${VOICE_WINDOW:-$VOICE_NAME}"
 save_workbench_config
+configure_macos_inputs
 
 ensure_dir "$AGENT1_NAME" "$AGENT1_DIR"
 ensure_dir "$AGENT2_NAME" "$AGENT2_DIR"
