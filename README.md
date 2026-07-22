@@ -275,7 +275,9 @@ On interactive launch, the workbench script shows the saved agent command, pane 
 When launched through `./run-auto.sh`, model downloads and enabled
 transcript-correction assets are checked in the foreground before tmux starts so
 download/cache logs are visible. Set `VOICE_AUTO_PREFETCH_MODELS=off` to skip
-that foreground check.
+that foreground check. If `tmux` is missing, `run-auto.sh` installs it with
+Homebrew on macOS or apt on Debian/Ubuntu before starting the workbench. Set
+`VOICE_AUTO_INSTALL_TMUX=0` to disable that automatic system-package change.
 The launcher does not block on the voice pane by default after startup. Set `AUTO_READY_TIMEOUT=300` to wait for a ready signal from the listener.
 
 ### Example Run

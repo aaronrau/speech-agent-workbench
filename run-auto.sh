@@ -46,6 +46,8 @@ load_local_env() {
 
 load_local_env
 
+"$ROOT/scripts/ensure-tmux.sh"
+
 CONFIG_PATH="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
 export VOICE_HOTKEY_CONFIG="$CONFIG_PATH"
 VAD_MODEL="${VOICE_AUTO_SHERPA_VAD_MODEL:-$ROOT/models/silero_vad.onnx}"
