@@ -234,9 +234,11 @@ Important fields:
 - `sherpa_model_dir`: included Parakeet ONNX model directory
 - `auto_trigger_word`: default is `agent`
 - `auto_trigger_aliases`: defaults include `codex`, `code x`, and `condex`
-- `auto_trigger_silence_seconds`: defaults to `2.0` seconds after the most recent VAD speech detection; newly detected speech resets the timer
+- `auto_trigger_silence_seconds`: defaults to `1.0` second after the most recent VAD speech detection; newly detected speech resets the timer
 - `auto_trigger_max_probes`: limits overlapping trigger-word transcriptions to `4`
 - `audio_debug`: defaults to `false` to hide probe and WAV diagnostics
+- `parakeet_onnx_provider`: defaults to `cpu`; avoids noisy CoreML/Metal context warnings and lowers macOS memory use
+- `auto_tmux_summary_console_log`: defaults to `false`; summaries still support API/webhook delivery without filling the voice pane
 - `auto_enable_terminate_commands`: defaults to `true`; set it to `false` for a persistent API
 - `transcript_correction_backend`: set to `llama-cpp` for model cleanup
 - `transcript_correction_llama_cpp_model`: GGUF model path for llama.cpp cleanup

@@ -11,13 +11,14 @@ def prefetch_stt_model(config_path, workbench_app):
     config = workbench_app.load_config(config_path)
     model_name = workbench_app.get_parakeet_onnx_model(config)
     quantization = workbench_app.get_parakeet_onnx_quantization(config)
+    provider = workbench_app.get_parakeet_onnx_provider(config)
 
     print(
         "[install] ensuring Parakeet ONNX STT model is downloaded "
-        f"(model={model_name}, quantization={quantization})...",
+        f"(model={model_name}, quantization={quantization}, provider={provider})...",
         flush=True,
     )
-    workbench_app.load_parakeet_onnx_model(model_name, quantization)
+    workbench_app.load_parakeet_onnx_model(model_name, quantization, provider)
     print("[install] Parakeet ONNX STT model ready.", flush=True)
 
 

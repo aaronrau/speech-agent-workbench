@@ -15,6 +15,7 @@ class FakeWorkbenchApp:
         return {
             "parakeet_onnx_model": "example/parakeet-onnx",
             "parakeet_onnx_quantization": "int8",
+            "parakeet_onnx_provider": "cpu",
         }
 
     def get_parakeet_onnx_model(self, config):
@@ -23,8 +24,11 @@ class FakeWorkbenchApp:
     def get_parakeet_onnx_quantization(self, config):
         return config["parakeet_onnx_quantization"]
 
-    def load_parakeet_onnx_model(self, model_name, quantization):
-        self.loaded_model = (model_name, quantization)
+    def get_parakeet_onnx_provider(self, config):
+        return config["parakeet_onnx_provider"]
+
+    def load_parakeet_onnx_model(self, model_name, quantization, provider):
+        self.loaded_model = (model_name, quantization, provider)
 
 
 class InstallRuntimeTests(unittest.TestCase):
@@ -38,7 +42,7 @@ class InstallRuntimeTests(unittest.TestCase):
         self.assertEqual(workbench_app.loaded_config_path, "/tmp/config.json")
         self.assertEqual(
             workbench_app.loaded_model,
-            ("example/parakeet-onnx", "int8"),
+            ("example/parakeet-onnx", "int8", "cpu"),
         )
         self.assertIn("Parakeet ONNX STT model ready", output.getvalue())
 

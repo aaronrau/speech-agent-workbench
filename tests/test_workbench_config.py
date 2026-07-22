@@ -20,9 +20,11 @@ class DefaultConfigTests(unittest.TestCase):
         ) as handle:
             config = json.load(handle)
 
-        self.assertEqual(config["auto_trigger_silence_seconds"], 2.0)
+        self.assertEqual(config["auto_trigger_silence_seconds"], 1.0)
         self.assertEqual(config["auto_trigger_max_probes"], 4)
         self.assertFalse(config["audio_debug"])
+        self.assertEqual(config["parakeet_onnx_provider"], "cpu")
+        self.assertFalse(config["auto_tmux_summary_console_log"])
         self.assertEqual(
             config["auto_trigger_silence_seconds"],
             DEFAULT_CONFIG["auto_trigger_silence_seconds"],

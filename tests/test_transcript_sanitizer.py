@@ -173,6 +173,36 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertGreater(removed, 0)
         self.assertEqual("".join(buffer), "second-third")
 
+    def test_tmux_summaries_are_silent_by_default(self):
+        with mock.patch("builtins.print") as print_output:
+            app.print_tmux_summary({}, "Flux", "run tests", "Tests passed.")
+
+        print_output.assert_not_called()
+
+    def test_tmux_summary_console_output_can_be_enabled(self):
+        config = {"auto_tmux_summary_console_log": True}
+
+        with mock.patch("builtins.print") as print_output:
+            app.print_tmux_summary(
+                config,
+                "Flux",
+                "run tests",
+                "Tests passed.",
+            )
+
+        self.assertEqual(print_output.call_count, 2)
+
+    def test_parakeet_cpu_provider_avoids_automatic_coreml_selection(self):
+        self.assertEqual(
+            app.resolve_parakeet_onnx_providers("cpu"),
+            ["CPUExecutionProvider"],
+        )
+        self.assertIsNone(app.resolve_parakeet_onnx_providers("auto"))
+        self.assertEqual(
+            app.resolve_parakeet_onnx_providers("coreml"),
+            ["CoreMLExecutionProvider", "CPUExecutionProvider"],
+        )
+
     def test_probe_runs_only_focus_commands(self):
         focus = {"tmux_send_target": "%1", "argv": ["tmux", "select-pane"]}
         clear = {

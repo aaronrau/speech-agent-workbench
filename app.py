@@ -93,6 +93,7 @@ DEFAULT_CONFIG = {
     "sherpa_provider": "cpu",
     "parakeet_onnx_model": "istupakov/parakeet-tdt-0.6b-v3-onnx",
     "parakeet_onnx_quantization": "int8",
+    "parakeet_onnx_provider": "cpu",
     "fallback_backend": None,
     "transcribe_request_timeout": 120,
     "torch_empty_cache_after_transcribe": None,
@@ -118,7 +119,7 @@ DEFAULT_CONFIG = {
     "auto_sherpa_vad_provider": "cpu",
     "auto_sherpa_vad_num_threads": 1,
     "auto_trigger_word": "agent",
-    "auto_trigger_silence_seconds": 2.0,
+    "auto_trigger_silence_seconds": 1.0,
     "auto_trigger_probe_seconds": 0.5,
     "auto_trigger_min_probe_seconds": 1.0,
     "auto_trigger_probe_window_seconds": 1.5,
@@ -137,6 +138,7 @@ DEFAULT_CONFIG = {
     "auto_tmux_console_poll_seconds": 0.05,
     "auto_tmux_console_idle_flush_seconds": 5.0,
     "auto_tmux_summary_enabled": True,
+    "auto_tmux_summary_console_log": False,
     "auto_tmux_summary_idle_seconds": 5.0,
     "auto_tmux_summary_lines": 50,
     "auto_tmux_summary_max_chars": 8000,
@@ -3504,6 +3506,27 @@ def get_parakeet_onnx_quantization(config):
     )
 
 
+def get_parakeet_onnx_provider(config):
+    return str(
+        os.environ.get(
+            "VOICE_PARAKEET_ONNX_PROVIDER",
+            config.get("parakeet_onnx_provider", "cpu"),
+        )
+        or "cpu"
+    ).strip().lower()
+
+
+def resolve_parakeet_onnx_providers(provider):
+    normalized = str(provider or "cpu").strip().lower()
+    if normalized in ("", "auto", "default"):
+        return None
+    if normalized in ("cpu", "cpuexecutionprovider"):
+        return ["CPUExecutionProvider"]
+    if normalized in ("coreml", "metal", "coremlexecutionprovider"):
+        return ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    return [str(provider).strip()]
+
+
 def resolve_parakeet_onnx_model_alias(model_name):
     if model_name in (
         "istupakov/parakeet-tdt-0.6b-v3-onnx",
@@ -3538,12 +3561,17 @@ def get_huggingface_cache_dir():
     return os.path.expanduser("~/.cache/huggingface/hub"), "default"
 
 
-def log_parakeet_onnx_download_info(model_name, resolved_model, quantization):
+def log_parakeet_onnx_download_info(
+    model_name,
+    resolved_model,
+    quantization,
+    provider,
+):
     cache_dir, source = get_huggingface_cache_dir()
     print(
         "[transcribe] parakeet-onnx loading "
         f"requested='{model_name}' resolved='{resolved_model}' "
-        f"quantization='{quantization}'"
+        f"quantization='{quantization}' provider='{provider}'"
     )
     print(
         f"[transcribe] parakeet-onnx download/cache dir: {cache_dir} "
@@ -3563,9 +3591,10 @@ def log_parakeet_onnx_download_info(model_name, resolved_model, quantization):
         )
 
 
-def load_parakeet_onnx_model(model_name, quantization):
+def load_parakeet_onnx_model(model_name, quantization, provider="cpu"):
     resolved_model = resolve_parakeet_onnx_model_alias(model_name)
-    cache_key = (resolved_model, quantization)
+    providers = resolve_parakeet_onnx_providers(provider)
+    cache_key = (resolved_model, quantization, tuple(providers or ()))
     if cache_key in PARAKEET_ONNX_MODEL_CACHE:
         return PARAKEET_ONNX_MODEL_CACHE[cache_key]
 
@@ -3587,8 +3616,17 @@ def load_parakeet_onnx_model(model_name, quantization):
             f"[transcribe] parakeet-onnx alias '{resolved_model}' for '{model_name}'"
         )
 
-    log_parakeet_onnx_download_info(model_name, resolved_model, quantization)
-    model = onnx_asr.load_model(resolved_model, quantization=quantization)
+    log_parakeet_onnx_download_info(
+        model_name,
+        resolved_model,
+        quantization,
+        provider,
+    )
+    model = onnx_asr.load_model(
+        resolved_model,
+        quantization=quantization,
+        providers=providers,
+    )
     PARAKEET_ONNX_MODEL_CACHE[cache_key] = model
     return model
 
@@ -4555,14 +4593,21 @@ def build_transcriber(
         elif transcribe_backend in ("parakeet", "parakeet-onnx"):
             model_name = get_parakeet_onnx_model(config)
             quantization = get_parakeet_onnx_quantization(config)
-            model = load_parakeet_onnx_model(model_name, quantization)
+            provider = get_parakeet_onnx_provider(config)
+            model = load_parakeet_onnx_model(
+                model_name,
+                quantization,
+                provider,
+            )
             transcribe_audio = lambda wav_path: transcribe_parakeet_onnx(
                 model, wav_path
             )
-            model_label = f"{model_name} (quantization={quantization})"
+            model_label = (
+                f"{model_name} (quantization={quantization}, provider={provider})"
+            )
             print(
                 f"[transcribe] parakeet-onnx model '{model_name}' "
-                f"(quantization={quantization})"
+                f"(quantization={quantization}, provider={provider})"
             )
         else:
             print(
@@ -5074,7 +5119,18 @@ def read_tmux_agent_tail_lines(config, command, agent_label):
     return lines, log_error, "tmux_console_log"
 
 
-def print_tmux_summary(agent_label, command_text, summary):
+def tmux_summary_console_log_enabled(config):
+    return get_config_bool(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_CONSOLE_LOG",
+        "auto_tmux_summary_console_log",
+        DEFAULT_CONFIG["auto_tmux_summary_console_log"],
+    )
+
+
+def print_tmux_summary(config, agent_label, command_text, summary):
+    if not tmux_summary_console_log_enabled(config):
+        return
     label = agent_label or "tmux"
     command = str(command_text or "").strip() or "unknown"
     summary = str(summary or "").strip() or "No summary was returned."
@@ -5226,6 +5282,8 @@ def get_tmux_summary_webhook_timeout(config):
 
 
 def log_tmux_summary_webhook_configuration(config):
+    if not tmux_summary_console_log_enabled(config):
+        return
     url = get_tmux_summary_webhook_url(config)
     summary_enabled = get_config_bool(
         config,
@@ -5709,7 +5767,7 @@ def route_api_local_summary(config, agent, message, commands):
         command_text,
         detail_lines,
     )
-    print_tmux_summary(agent_label, command_text, summary)
+    print_tmux_summary(config, agent_label, command_text, summary)
     print(
         f"[api] summarized local tmux output for {agent_label} "
         f"({len(lines)} lines from {source})",
@@ -6030,7 +6088,8 @@ def start_agent_completion_log_tailer(config):
             return
 
         position = os.path.getsize(path)
-        print(f"[auto] agent completion log: {path}")
+        if audio_debug_enabled(config):
+            print(f"[auto] agent completion log: {path}")
         last_trim = 0.0
         reported_read_error = False
         while not stop_event.is_set():
@@ -6185,8 +6244,9 @@ def start_auto_tmux_console_log_tailer(config):
             except OSError:
                 position = 0
 
-        print(f"[auto] tmux console log: {path}")
-        if summary_enabled:
+        if audio_debug_enabled(config):
+            print(f"[auto] tmux console log: {path}")
+        if summary_enabled and tmux_summary_console_log_enabled(config):
             print(
                 "[auto] tmux summaries enabled: "
                 f"last {summary_lines} lines after {summary_idle_seconds:.1f}s idle"
@@ -6312,7 +6372,12 @@ def start_auto_tmux_console_log_tailer(config):
                                 flush=True,
                             )
                             continue
-                        print_tmux_summary(agent_label, command_text, summary)
+                        print_tmux_summary(
+                            config,
+                            agent_label,
+                            command_text,
+                            summary,
+                        )
                         dispatch_tmux_summary_webhook(
                             config,
                             agent_label,
@@ -7974,7 +8039,7 @@ def main():
         config,
         "VOICE_AUTO_TRIGGER_SILENCE_SECONDS",
         "auto_trigger_silence_seconds",
-        2.0,
+        1.0,
         minimum=0.2,
     )
     auto_trigger_probe_seconds = get_config_float(
@@ -8616,6 +8681,7 @@ def main():
             "transcribe_fn": transcribe_fn,
             "transcribe_name": transcribe_name,
             "log_prefix": "auto",
+            "quiet": not audio_debug_enabled(config),
         }
 
     auto_trigger_session = make_auto_trigger_session()
