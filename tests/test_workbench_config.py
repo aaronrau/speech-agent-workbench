@@ -25,6 +25,7 @@ class DefaultConfigTests(unittest.TestCase):
         self.assertFalse(config["audio_debug"])
         self.assertEqual(config["parakeet_onnx_provider"], "cpu")
         self.assertFalse(config["auto_tmux_summary_console_log"])
+        self.assertEqual(config["api_host"], "auto")
         self.assertTrue(config["api_websocket_enabled"])
         self.assertEqual(config["api_websocket_path"], "/ws")
         self.assertEqual(config["api_websocket_replay_events"], 100)

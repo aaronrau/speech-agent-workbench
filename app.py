@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -155,7 +156,7 @@ DEFAULT_CONFIG = {
     "agent_completion_log_max_bytes": 262144,
     "agent_completion_log_poll_seconds": 0.2,
     "api_enabled": False,
-    "api_host": "127.0.0.1",
+    "api_host": "auto",
     "api_port": 8787,
     "api_token": None,
     "api_websocket_enabled": True,
@@ -5852,13 +5853,66 @@ def voice_api_authorized(headers, token):
     return headers.get("X-Voice-Api-Token", "") == token
 
 
+AUTO_VOICE_API_HOSTS = {
+    "auto",
+    "lan",
+    "local_network",
+    "local-network",
+    "network",
+}
+
+
+def get_configured_voice_api_host(config):
+    return (
+        get_config_string(
+            config,
+            "VOICE_API_HOST",
+            "api_host",
+            DEFAULT_CONFIG["api_host"],
+        )
+        or DEFAULT_CONFIG["api_host"]
+    ).strip()
+
+
+def detect_local_network_address():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("192.0.2.1", 9))
+        address = str(sock.getsockname()[0] or "").strip()
+        if address and not address.startswith("127."):
+            return address
+    except OSError:
+        pass
+    finally:
+        sock.close()
+
+    try:
+        addresses = socket.getaddrinfo(
+            socket.gethostname(),
+            None,
+            family=socket.AF_INET,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError:
+        addresses = []
+    for address in addresses:
+        candidate = str(address[4][0] or "").strip()
+        if (
+            candidate
+            and not candidate.startswith("127.")
+            and not candidate.startswith("169.254.")
+        ):
+            return candidate
+    return "127.0.0.1"
+
+
 def get_voice_api_bind(config):
-    host = get_config_string(
-        config,
-        "VOICE_API_HOST",
-        "api_host",
-        DEFAULT_CONFIG["api_host"],
-    ) or "127.0.0.1"
+    configured_host = get_configured_voice_api_host(config)
+    host = (
+        "0.0.0.0"
+        if configured_host.lower().replace(" ", "_") in AUTO_VOICE_API_HOSTS
+        else configured_host
+    )
     port = get_config_int(
         config,
         "VOICE_API_PORT",
@@ -5867,6 +5921,14 @@ def get_voice_api_bind(config):
         minimum=1,
     )
     return host, port
+
+
+def get_voice_api_advertised_host(config, bind_host=None):
+    configured_host = get_configured_voice_api_host(config)
+    normalized = configured_host.lower().replace(" ", "_")
+    if normalized in AUTO_VOICE_API_HOSTS or configured_host in ("0.0.0.0", "::"):
+        return detect_local_network_address()
+    return str(bind_host or configured_host).strip() or "127.0.0.1"
 
 
 def get_voice_api_token(config):
@@ -6584,9 +6646,10 @@ class VoiceApiServer:
 
 def log_voice_api_configuration(config, commands, enabled):
     host, port = get_voice_api_bind(config)
-    post_url = build_voice_api_post_url(host, port)
+    advertised_host = get_voice_api_advertised_host(config, host)
+    post_url = build_voice_api_post_url(advertised_host, port)
     websocket_url = build_voice_api_websocket_url(
-        host,
+        advertised_host,
         port,
         get_voice_api_websocket_path(config),
     )
@@ -6601,11 +6664,12 @@ def log_voice_api_configuration(config, commands, enabled):
         )
         return
     print(
-        f"[api] server listening on http://{format_voice_api_url_host(host)}:{port}",
+        "[api] server listening on "
+        f"http://{format_voice_api_url_host(advertised_host)}:{port}",
         flush=True,
     )
     print(f"[api] POST {post_url}", flush=True)
-    if format_voice_api_url_host(host) != host:
+    if advertised_host != host:
         print(f"[api] bound to {host}:{port}", flush=True)
     print(
         "[api] payload: "
@@ -9402,9 +9466,10 @@ def main():
                 DEFAULT_CONFIG["api_enabled"],
             ):
                 host, port = get_voice_api_bind(config)
+                advertised_host = get_voice_api_advertised_host(config, host)
                 print(
                     "[auto] paused audio listening. API routing remains active: "
-                    f"POST {build_voice_api_post_url(host, port)}. "
+                    f"POST {build_voice_api_post_url(advertised_host, port)}. "
                     "Press Ctrl again to resume."
                 )
             else:

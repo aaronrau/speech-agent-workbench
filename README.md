@@ -460,10 +460,13 @@ VOICE_API_ENABLED=1 VOICE_API_TOKEN=local-secret ./run-auto.sh
 ```
 
 Once the Wolf process binds successfully, its console prints both
-`[api] server listening on http://127.0.0.1:8787` and the full
-`POST /messages` and `WebSocket ws://127.0.0.1:8787/ws` endpoints. If those
-lines are absent, the workbench API is not running and callers will receive a
-connection failure.
+`[api] server listening on http://<local-network-address>:8787` and the full
+`POST /messages` and `WebSocket ws://<local-network-address>:8787/ws`
+endpoints. With the default `api_host: "auto"`, the server listens on all IPv4
+interfaces and determines the advertised address from the active network route
+at startup. Set `api_host` explicitly to `127.0.0.1` when the API must remain
+local to the computer. If the startup lines are absent, the workbench API is
+not running and callers will receive a connection failure.
 
 The next line prints `[api] WebSocket secret: <token>` so the value can be
 entered in the connecting client. It prints `none required` when API
@@ -510,7 +513,8 @@ with the available agents.
 
 ### WebSocket Message API
 
-WebSocket clients connect to `ws://127.0.0.1:8787/ws` with the same
+WebSocket clients connect to the dynamically printed
+`ws://<local-network-address>:8787/ws` URL with the same
 `Authorization: Bearer <VOICE_API_TOKEN>` or `X-Voice-Api-Token` header used by
 the HTTP endpoint. Tokens in the URL query string are not accepted.
 

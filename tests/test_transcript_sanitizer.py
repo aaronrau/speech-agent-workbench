@@ -417,16 +417,21 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             },
         }
         config = {
-            "api_host": "127.0.0.1",
+            "api_host": "auto",
             "api_port": 8787,
             "api_token": "local-secret",
         }
 
-        with mock.patch("builtins.print") as printed:
-            app.log_voice_api_configuration(config, commands, enabled=True)
+        with mock.patch.object(
+            app,
+            "detect_local_network_address",
+            return_value="192.168.68.66",
+        ):
+            with mock.patch("builtins.print") as printed:
+                app.log_voice_api_configuration(config, commands, enabled=True)
 
         lines = [call.args[0] for call in printed.call_args_list]
-        self.assertIn("[api] WebSocket ws://127.0.0.1:8787/ws", lines)
+        self.assertIn("[api] WebSocket ws://192.168.68.66:8787/ws", lines)
         self.assertIn("[api] WebSocket secret: local-secret", lines)
         self.assertIn("[api] agents: Flux, Wolf", lines)
         self.assertIn("[api] agent controls: Flux clear terminal", lines)
@@ -855,6 +860,20 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             app.build_voice_api_post_url("0.0.0.0", 8787),
             "http://127.0.0.1:8787/messages",
         )
+
+    def test_voice_api_auto_host_binds_all_and_advertises_detected_lan_ip(self):
+        config = {"api_host": "auto", "api_port": 8787}
+
+        self.assertEqual(app.get_voice_api_bind(config), ("0.0.0.0", 8787))
+        with mock.patch.object(
+            app,
+            "detect_local_network_address",
+            return_value="192.168.68.66",
+        ):
+            self.assertEqual(
+                app.get_voice_api_advertised_host(config, "0.0.0.0"),
+                "192.168.68.66",
+            )
 
     def test_trim_auto_tmux_console_log_caps_size(self):
         now = int(time.time())
