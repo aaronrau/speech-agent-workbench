@@ -69,7 +69,9 @@ Enable the local API with a token:
 VOICE_API_ENABLED=1 VOICE_API_TOKEN=local-secret ./run-auto.sh
 ```
 
-Then use `POST /messages` to send prompts or control the workbench:
+The API serves both the backwards-compatible `POST /messages` endpoint and an
+authenticated WebSocket at `ws://127.0.0.1:8787/ws`. Existing HTTP callers can
+continue to send prompts or control the workbench:
 
 ```bash
 # Send a prompt to an agent.
@@ -107,7 +109,7 @@ $VOICE_AGENT_SIGNAL_COMMAND done "tests passed"
    working directory with `agent_workbench.agent_command`.
 3. Microphone audio is segmented by VAD and transcribed locally with Parakeet
    ONNX by default. Agent Audio Pipe can instead send text through the local
-   HTTP API while the workbench runs with `--disable-stt`.
+   HTTP or WebSocket API while the workbench runs with `--disable-stt`.
 4. The transcript first receives deterministic fixes for common coding terms.
    When `transcript_correction_backend` is `llama-cpp`, the local Gemma model
    gets the complete correction policy plus the currently available agent names
@@ -120,7 +122,8 @@ $VOICE_AGENT_SIGNAL_COMMAND done "tests passed"
    uses the platform clipboard/keyboard integration instead.
 7. Successful messages are recorded in transcript history. Optional background
    workers capture agent output, create local llama.cpp summaries, print
-   completion signals, and deliver configured summary webhooks.
+   completion signals, publish WebSocket progress/completion events, and
+   deliver configured summary webhooks.
 
 ## Project Status
 
@@ -458,8 +461,9 @@ VOICE_API_ENABLED=1 VOICE_API_TOKEN=local-secret ./run-auto.sh
 
 Once the Wolf process binds successfully, its console prints both
 `[api] server listening on http://127.0.0.1:8787` and the full
-`POST /messages` endpoint. If those lines are absent, the workbench API is not
-running and callers will receive a connection failure.
+`POST /messages` and `WebSocket ws://127.0.0.1:8787/ws` endpoints. If those
+lines are absent, the workbench API is not running and callers will receive a
+connection failure.
 
 `run-auto.sh` also loads local defaults from `.env` when that file exists.
 Values supplied explicitly in the shell take precedence over `.env` values.
@@ -499,6 +503,71 @@ webhook.
 Only configured agent targets are accepted. Unknown names return a JSON error
 with the available agents.
 
+### WebSocket Message API
+
+WebSocket clients connect to `ws://127.0.0.1:8787/ws` with the same
+`Authorization: Bearer <VOICE_API_TOKEN>` or `X-Voice-Api-Token` header used by
+the HTTP endpoint. Tokens in the URL query string are not accepted.
+
+The server first sends a `connection.ready` frame containing its protocol
+version, `server_session_id`, available agents, and configured controls. Send a
+correlated agent message with:
+
+```json
+{
+  "type": "message.send",
+  "request_id": "client-generated-id",
+  "agent": "Flux",
+  "message": "pull the latest"
+}
+```
+
+The immediate `message.accepted` response means the text was routed to tmux; it
+does not mean the agent finished. Idle summaries arrive as `message.progress`
+events. When the agent invokes
+`$VOICE_AGENT_SIGNAL_COMMAND done "tests passed"`, the same connection receives
+a `message.completed` event. Both events carry the original `request_id` and
+the existing summary payload under `payload`.
+
+Only one active WebSocket request is allowed per agent because completion
+signals identify an agent rather than an individual prompt. A second request
+returns `message.error` with `error: "agent_busy"` and the active request ID.
+HTTP requests retain their existing behavior. If an HTTP request targets an
+agent with an active WebSocket request, the HTTP message is still routed and
+the WebSocket request receives a final `superseded` event so a later completion
+cannot be correlated to the wrong prompt.
+
+Request a read-only on-demand summary without starting an active agent request:
+
+```json
+{
+  "type": "summary.request",
+  "request_id": "summary-id",
+  "agent": "Flux"
+}
+```
+
+The correlated response type is `summary.result`. For a gradual migration, the
+WebSocket also accepts the legacy message shapes
+`{"agent":"Flux","message":"..."}` and
+`{"type":"local","agent":"Flux"}`.
+
+Progress and completion events have monotonically increasing `event_id` values.
+A client can acknowledge an event with
+`{"type":"event.ack","event_id":42}`. After reconnecting, send
+`{"type":"connection.resume","resume_after_event_id":42}` to replay newer
+events from the bounded in-memory buffer. Compare `server_session_id` with the
+previous connection; a changed value means the workbench restarted and the old
+in-memory replay buffer no longer exists.
+
+WebSockets are enabled whenever the message API is enabled. The relevant
+settings are `VOICE_API_WEBSOCKET_ENABLED`,
+`VOICE_API_WEBSOCKET_PATH`, `VOICE_API_WEBSOCKET_HEARTBEAT_SECONDS`,
+`VOICE_API_WEBSOCKET_MAX_MESSAGE_BYTES`, and
+`VOICE_API_WEBSOCKET_REPLAY_EVENTS`.
+
+### Summary Webhook Compatibility
+
 Set `VOICE_TMUX_SUMMARY_WEBHOOK_URL` to receive each tmux summary as JSON:
 
 ```json
@@ -527,6 +596,9 @@ its default name is `Wolf`.
 
 Use `VOICE_TMUX_SUMMARY_WEBHOOK_TOKEN` to send an `Authorization: Bearer ...`
 header and `VOICE_TMUX_SUMMARY_WEBHOOK_TIMEOUT` to tune the POST timeout.
+The webhook remains fully supported for backwards compatibility. When both
+transports are enabled, summaries are delivered independently to connected
+WebSocket clients and to the configured webhook.
 
 ## Notes
 

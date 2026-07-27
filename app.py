@@ -1,4 +1,5 @@
 import ast
+import asyncio
 import bisect
 import gc
 import hashlib
@@ -17,10 +18,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import wave
-from collections import Counter
+from collections import Counter, deque
 from glob import glob
 
 import numpy as np
+
+try:
+    from aiohttp import WSMsgType, web
+except Exception:
+    WSMsgType = None
+    web = None
 
 try:
     import sounddevice as sd
@@ -151,6 +158,11 @@ DEFAULT_CONFIG = {
     "api_host": "127.0.0.1",
     "api_port": 8787,
     "api_token": None,
+    "api_websocket_enabled": True,
+    "api_websocket_heartbeat_seconds": 20.0,
+    "api_websocket_max_message_bytes": 65536,
+    "api_websocket_path": "/ws",
+    "api_websocket_replay_events": 100,
     "tmux_summary_webhook_url": None,
     "tmux_summary_webhook_token": None,
     "tmux_summary_webhook_timeout": 5.0,
@@ -199,6 +211,8 @@ TMUX_SUMMARY_SNAPSHOTS = {}
 TMUX_SUMMARY_SNAPSHOTS_LOCK = threading.Lock()
 TMUX_WEBHOOK_LAST_DETAIL_LINES = {}
 TMUX_WEBHOOK_LAST_DETAIL_LINES_LOCK = threading.Lock()
+ACTIVE_VOICE_API_SERVER = None
+ACTIVE_VOICE_API_SERVER_LOCK = threading.Lock()
 ALLOWED_TRANSCRIPT_SYMBOLS = {".", "+"}
 
 
@@ -5421,6 +5435,30 @@ def post_tmux_summary_webhook(
         return False
 
 
+def publish_tmux_summary_websocket_event(
+    agent_label,
+    command_text,
+    summary,
+    detail_lines,
+    phase="in_progress",
+    completion_status="",
+    completion_message="",
+):
+    server = get_active_voice_api_server()
+    if server is None or not getattr(server, "websocket_enabled", False):
+        return None
+    payload = build_tmux_summary_webhook_payload(
+        agent_label,
+        command_text,
+        summary,
+        detail_lines=detail_lines,
+        phase=phase,
+        completion_status=completion_status,
+        completion_message=completion_message,
+    )
+    return server.publish_summary(payload)
+
+
 def dispatch_tmux_summary_webhook(
     config,
     agent_label,
@@ -5442,6 +5480,15 @@ def dispatch_tmux_summary_webhook(
         summary,
         detail_lines,
         phase=phase,
+    )
+    publish_tmux_summary_websocket_event(
+        agent_label,
+        command_text,
+        summary,
+        snapshot["detail_lines"],
+        phase=snapshot["phase"],
+        completion_status=completion_status,
+        completion_message=completion_message,
     )
     if not get_tmux_summary_webhook_url(config):
         return None
@@ -5597,7 +5644,13 @@ def maybe_correct_api_control_text(config, control_text, available):
     return corrected or control_text, details
 
 
-def route_api_message_to_tmux(agent, message, commands, config=None):
+def route_api_message_to_tmux(
+    agent,
+    message,
+    commands,
+    config=None,
+    before_control_command=None,
+):
     index, available = build_api_agent_command_index(commands)
     agent_controls, session_controls = build_api_control_command_labels(commands)
     correction_labels = sorted(
@@ -5661,6 +5714,8 @@ def route_api_message_to_tmux(agent, message, commands, config=None):
                 "message": body,
                 "sent": False,
             }
+        if before_control_command is not None:
+            before_control_command(control_command)
         ran = run_auto_shell_command(control_command)
         print(
             f"[api] ran control command: {control_command.get('label') or control_text}",
@@ -5838,9 +5893,703 @@ def build_voice_api_post_url(host, port):
     return f"http://{format_voice_api_url_host(host)}:{int(port)}/messages"
 
 
+def get_voice_api_websocket_path(config):
+    path = get_config_string(
+        config,
+        "VOICE_API_WEBSOCKET_PATH",
+        "api_websocket_path",
+        DEFAULT_CONFIG["api_websocket_path"],
+    ) or "/ws"
+    path = "/" + path.strip().strip("/")
+    return path or "/ws"
+
+
+def voice_api_websocket_enabled(config):
+    return get_config_bool(
+        config,
+        "VOICE_API_WEBSOCKET_ENABLED",
+        "api_websocket_enabled",
+        DEFAULT_CONFIG["api_websocket_enabled"],
+    )
+
+
+def build_voice_api_websocket_url(host, port, path="/ws"):
+    path = "/" + str(path or "/ws").strip().strip("/")
+    return f"ws://{format_voice_api_url_host(host)}:{int(port)}{path}"
+
+
+def get_active_voice_api_server():
+    with ACTIVE_VOICE_API_SERVER_LOCK:
+        return ACTIVE_VOICE_API_SERVER
+
+
+def set_active_voice_api_server(server):
+    global ACTIVE_VOICE_API_SERVER
+    with ACTIVE_VOICE_API_SERVER_LOCK:
+        ACTIVE_VOICE_API_SERVER = server
+    return server
+
+
+class VoiceApiServer:
+    protocol_version = 1
+
+    def __init__(self, config, commands, host, port):
+        self.config = config
+        self.commands = commands
+        self.host = host
+        self.port = int(port)
+        self.token = get_voice_api_token(config)
+        self.websocket_enabled = voice_api_websocket_enabled(config)
+        self.websocket_path = get_voice_api_websocket_path(config)
+        self.websocket_heartbeat_seconds = get_config_float(
+            config,
+            "VOICE_API_WEBSOCKET_HEARTBEAT_SECONDS",
+            "api_websocket_heartbeat_seconds",
+            DEFAULT_CONFIG["api_websocket_heartbeat_seconds"],
+            minimum=0.0,
+        )
+        self.websocket_max_message_bytes = get_config_int(
+            config,
+            "VOICE_API_WEBSOCKET_MAX_MESSAGE_BYTES",
+            "api_websocket_max_message_bytes",
+            DEFAULT_CONFIG["api_websocket_max_message_bytes"],
+            minimum=1024,
+        )
+        replay_events = get_config_int(
+            config,
+            "VOICE_API_WEBSOCKET_REPLAY_EVENTS",
+            "api_websocket_replay_events",
+            DEFAULT_CONFIG["api_websocket_replay_events"],
+            minimum=1,
+        )
+        self.server_session_id = os.urandom(12).hex()
+        self._active_requests = {}
+        self._client_acks = {}
+        self._clients = set()
+        self._event_sequence = 0
+        self._last_detail_lines = {}
+        self._loop = None
+        self._loop_thread_id = None
+        self._runner = None
+        self._site = None
+        self._start_error = None
+        self._started = threading.Event()
+        self._state_lock = threading.Lock()
+        self._replay_events = deque(maxlen=replay_events)
+        self._thread = threading.Thread(
+            target=self._thread_main,
+            name="voice-api-server",
+            daemon=True,
+        )
+
+    def start(self, timeout=5.0):
+        self._thread.start()
+        if not self._started.wait(timeout):
+            self._start_error = TimeoutError("API server startup timed out")
+            return False
+        return self._start_error is None
+
+    def shutdown(self):
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        future = asyncio.run_coroutine_threadsafe(self._shutdown_async(), loop)
+        try:
+            future.result(timeout=3.0)
+        except Exception:
+            pass
+        loop.call_soon_threadsafe(loop.stop)
+
+    def server_close(self):
+        self.shutdown()
+        if self._thread.is_alive() and threading.get_ident() != self._thread.ident:
+            self._thread.join(timeout=3.0)
+        if get_active_voice_api_server() is self:
+            set_active_voice_api_server(None)
+
+    def _thread_main(self):
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        self._loop_thread_id = threading.get_ident()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._start_async())
+        except BaseException as exc:
+            self._start_error = exc
+            self._started.set()
+        else:
+            self._started.set()
+            loop.run_forever()
+        finally:
+            try:
+                loop.run_until_complete(self._shutdown_async())
+            except Exception:
+                pass
+            loop.close()
+            self._loop = None
+            self._loop_thread_id = None
+
+    async def _start_async(self):
+        application = web.Application(
+            client_max_size=self.websocket_max_message_bytes
+        )
+        application.router.add_post("/messages", self._handle_http_messages)
+        application.router.add_post("/messages/", self._handle_http_messages)
+        if self.websocket_enabled:
+            application.router.add_get(
+                self.websocket_path,
+                self._handle_websocket,
+            )
+            if self.websocket_path != "/":
+                application.router.add_get(
+                    self.websocket_path + "/",
+                    self._handle_websocket,
+                )
+        self._runner = web.AppRunner(application, access_log=None)
+        await self._runner.setup()
+        self._site = web.TCPSite(self._runner, self.host, self.port)
+        await self._site.start()
+
+    async def _shutdown_async(self):
+        clients = list(self._clients)
+        self._clients.clear()
+        if clients:
+            await asyncio.gather(
+                *(
+                    client.close(
+                        code=1001,
+                        message=b"workbench API shutting down",
+                    )
+                    for client in clients
+                ),
+                return_exceptions=True,
+            )
+        runner = self._runner
+        self._runner = None
+        self._site = None
+        if runner is not None:
+            await runner.cleanup()
+
+    def _connection_ready_payload(self):
+        _index, available = build_api_agent_command_index(self.commands)
+        agent_controls, session_controls = build_api_control_command_labels(
+            self.commands
+        )
+        return {
+            "type": "connection.ready",
+            "version": self.protocol_version,
+            "server_session_id": self.server_session_id,
+            "agents": available,
+            "agent_controls": agent_controls,
+            "session_controls": session_controls,
+            "websocket_path": self.websocket_path,
+        }
+
+    async def _handle_http_messages(self, request):
+        if not voice_api_authorized(request.headers, self.token):
+            return web.json_response(
+                {"ok": False, "error": "unauthorized"},
+                status=401,
+            )
+        try:
+            body = await request.read()
+        except web.HTTPRequestEntityTooLarge:
+            return web.json_response(
+                {"ok": False, "error": "invalid_body_size"},
+                status=400,
+            )
+        if not body or len(body) > self.websocket_max_message_bytes:
+            return web.json_response(
+                {"ok": False, "error": "invalid_body_size"},
+                status=400,
+            )
+        api_request, error = parse_api_message_request(
+            body,
+            request.headers.get("Content-Type", ""),
+        )
+        if error:
+            return web.json_response(
+                {"ok": False, "error": error},
+                status=400,
+            )
+
+        def route_request():
+            try:
+                if api_request["type"] == "local":
+                    return route_api_local_summary(
+                        self.config,
+                        api_request["agent"],
+                        api_request["message"],
+                        self.commands,
+                    )
+                return route_api_message_to_tmux(
+                    api_request["agent"],
+                    api_request["message"],
+                    self.commands,
+                    self.config,
+                )
+            except SystemExit:
+                return {
+                    "ok": True,
+                    "agent": api_request["agent"],
+                    "control": True,
+                    "message": api_request["message"],
+                    "sent": False,
+                    "terminating": True,
+                }
+
+        result = await asyncio.to_thread(route_request)
+        if (
+            api_request["type"] != "local"
+            and result.get("ok")
+            and (result.get("sent") or result.get("control"))
+        ):
+            self.supersede_active_request(
+                result.get("agent") or api_request["agent"],
+                reason="legacy_http_request",
+            )
+        return web.json_response(
+            result,
+            status=200 if result.get("ok") else 400,
+            dumps=lambda payload: json.dumps(payload, sort_keys=True),
+        )
+
+    async def _handle_websocket(self, request):
+        if not voice_api_authorized(request.headers, self.token):
+            return web.json_response(
+                {"ok": False, "error": "unauthorized"},
+                status=401,
+            )
+        heartbeat = self.websocket_heartbeat_seconds or None
+        websocket = web.WebSocketResponse(
+            heartbeat=heartbeat,
+            max_msg_size=self.websocket_max_message_bytes,
+        )
+        await websocket.prepare(request)
+        self._clients.add(websocket)
+        self._client_acks[id(websocket)] = 0
+        await websocket.send_json(self._connection_ready_payload())
+        try:
+            async for message in websocket:
+                if message.type == WSMsgType.TEXT:
+                    await self._handle_websocket_text(websocket, message.data)
+                elif message.type == WSMsgType.BINARY:
+                    await self._send_protocol_error(
+                        websocket,
+                        "binary_messages_not_supported",
+                    )
+                elif message.type == WSMsgType.ERROR:
+                    break
+        finally:
+            self._clients.discard(websocket)
+            self._client_acks.pop(id(websocket), None)
+        return websocket
+
+    async def _send_protocol_error(
+        self,
+        websocket,
+        error,
+        request_id=None,
+        **fields,
+    ):
+        payload = {
+            "type": "message.error",
+            "version": self.protocol_version,
+            "ok": False,
+            "error": str(error),
+        }
+        if request_id:
+            payload["request_id"] = request_id
+        payload.update(fields)
+        await websocket.send_json(payload)
+
+    async def _handle_websocket_text(self, websocket, text):
+        try:
+            payload = json.loads(str(text or ""))
+        except json.JSONDecodeError:
+            await self._send_protocol_error(websocket, "invalid_json")
+            return
+        if not isinstance(payload, dict):
+            await self._send_protocol_error(websocket, "invalid_payload")
+            return
+
+        message_type = str(payload.get("type") or "").strip().lower()
+        if message_type == "event.ack":
+            try:
+                event_id = max(0, int(payload.get("event_id") or 0))
+            except (TypeError, ValueError):
+                await self._send_protocol_error(websocket, "invalid_event_id")
+                return
+            self._client_acks[id(websocket)] = event_id
+            return
+        if message_type == "connection.resume":
+            try:
+                event_id = max(
+                    0,
+                    int(
+                        payload.get("resume_after_event_id")
+                        or payload.get("event_id")
+                        or 0
+                    ),
+                )
+            except (TypeError, ValueError):
+                await self._send_protocol_error(websocket, "invalid_event_id")
+                return
+            with self._state_lock:
+                replay = [
+                    dict(event)
+                    for event in self._replay_events
+                    if int(event.get("event_id") or 0) > event_id
+                ]
+            for event in replay:
+                await websocket.send_json(event)
+            await websocket.send_json(
+                {
+                    "type": "connection.resumed",
+                    "version": self.protocol_version,
+                    "server_session_id": self.server_session_id,
+                    "resume_after_event_id": event_id,
+                    "replayed_event_count": len(replay),
+                }
+            )
+            return
+
+        if message_type in ("summary.request", "local"):
+            api_message_type = "local"
+        elif message_type in (
+            "",
+            "message.send",
+            "tmux",
+            "command",
+            "send",
+        ):
+            api_message_type = "tmux"
+        else:
+            await self._send_protocol_error(
+                websocket,
+                "invalid_message_type",
+                request_id=str(
+                    payload.get("request_id") or payload.get("id") or ""
+                ).strip()
+                or None,
+            )
+            return
+
+        request_id = str(
+            payload.get("request_id") or payload.get("id") or ""
+        ).strip()
+        if not request_id:
+            request_id = f"ws-{os.urandom(12).hex()}"
+        if len(request_id) > 128:
+            await self._send_protocol_error(
+                websocket,
+                "invalid_request_id",
+            )
+            return
+
+        api_payload = dict(payload)
+        api_payload["type"] = api_message_type
+        api_payload.pop("request_id", None)
+        api_payload.pop("id", None)
+        api_request, error = parse_api_message_request(
+            json.dumps(api_payload),
+            "application/json",
+        )
+        if error:
+            await self._send_protocol_error(
+                websocket,
+                error,
+                request_id=request_id,
+            )
+            return
+        if api_request["type"] == "local":
+            result = await asyncio.to_thread(
+                route_api_local_summary,
+                self.config,
+                api_request["agent"],
+                api_request["message"],
+                self.commands,
+            )
+            response = {
+                "type": (
+                    "summary.result" if result.get("ok") else "message.error"
+                ),
+                "version": self.protocol_version,
+                "request_id": request_id,
+                "ok": bool(result.get("ok")),
+                "result": result,
+            }
+            if not result.get("ok"):
+                response["error"] = result.get("error") or "summary_failed"
+            await websocket.send_json(response)
+            return
+        await self._route_websocket_message(
+            websocket,
+            request_id,
+            api_request,
+        )
+
+    def _resolve_request_agent(self, agent):
+        index, _available = build_api_agent_command_index(self.commands)
+        command = index.get(normalize_voice_command_text(agent))
+        if command is None:
+            return None, None
+        label = str(command.get("label") or agent or "").strip()
+        return normalize_tmux_agent_key(label), label
+
+    def _reserve_request(self, agent_key, request_id, agent_label, message):
+        with self._state_lock:
+            existing = self._active_requests.get(agent_key)
+            if existing:
+                if existing.get("request_id") == request_id:
+                    return existing, "duplicate"
+                return existing, "busy"
+            record = {
+                "agent": agent_label,
+                "message": str(message or ""),
+                "request_id": request_id,
+                "result": None,
+                "timestamp": time.time(),
+            }
+            self._active_requests[agent_key] = record
+            self._last_detail_lines.pop(agent_key, None)
+            return record, "new"
+
+    def _release_request(self, agent_key, request_id):
+        if not agent_key:
+            return
+        with self._state_lock:
+            current = self._active_requests.get(agent_key)
+            if current and current.get("request_id") == request_id:
+                self._active_requests.pop(agent_key, None)
+
+    async def _route_websocket_message(
+        self,
+        websocket,
+        request_id,
+        api_request,
+    ):
+        agent_key, agent_label = self._resolve_request_agent(
+            api_request["agent"]
+        )
+        if agent_key:
+            active, reservation = self._reserve_request(
+                agent_key,
+                request_id,
+                agent_label,
+                api_request["message"],
+            )
+            if reservation == "busy":
+                await self._send_protocol_error(
+                    websocket,
+                    "agent_busy",
+                    request_id=request_id,
+                    agent=agent_label,
+                    active_request_id=active.get("request_id"),
+                )
+                return
+            if reservation == "duplicate":
+                response = {
+                    "type": "message.accepted",
+                    "version": self.protocol_version,
+                    "request_id": request_id,
+                    "ok": True,
+                    "duplicate": True,
+                    "pending": active.get("result") is None,
+                }
+                if active.get("result") is not None:
+                    response["result"] = active["result"]
+                await websocket.send_json(response)
+                return
+
+        def before_control_command(command):
+            if not command.get("exit_after"):
+                return
+            self.publish_event(
+                "session.terminating",
+                agent=agent_label or api_request["agent"],
+                request_id=request_id,
+                payload={
+                    "agent": agent_label or api_request["agent"],
+                    "command": command.get("label") or "",
+                    "is_final": True,
+                    "phase": "final",
+                },
+                wait=True,
+            )
+
+        def route_request():
+            try:
+                return route_api_message_to_tmux(
+                    api_request["agent"],
+                    api_request["message"],
+                    self.commands,
+                    self.config,
+                    before_control_command=before_control_command,
+                )
+            except SystemExit:
+                return {
+                    "ok": True,
+                    "agent": agent_label or api_request["agent"],
+                    "control": True,
+                    "message": api_request["message"],
+                    "sent": False,
+                    "terminating": True,
+                }
+
+        result = await asyncio.to_thread(route_request)
+        if not result.get("ok"):
+            self._release_request(agent_key, request_id)
+            await self._send_protocol_error(
+                websocket,
+                result.get("error") or "route_failed",
+                request_id=request_id,
+                agent=result.get("agent") or api_request["agent"],
+                result=result,
+            )
+            return
+        if agent_key:
+            with self._state_lock:
+                active = self._active_requests.get(agent_key)
+                if active and active.get("request_id") == request_id:
+                    active["result"] = dict(result)
+        await websocket.send_json(
+            {
+                "type": "message.accepted",
+                "version": self.protocol_version,
+                "request_id": request_id,
+                "ok": True,
+                "result": result,
+            }
+        )
+        if result.get("control"):
+            self._release_request(agent_key, request_id)
+            self.publish_event(
+                "message.completed",
+                agent=result.get("agent") or agent_label,
+                request_id=request_id,
+                payload={
+                    **result,
+                    "completion_status": (
+                        "terminating"
+                        if result.get("terminating")
+                        else "control_completed"
+                    ),
+                    "is_final": True,
+                    "phase": "final",
+                },
+            )
+
+    def publish_event(
+        self,
+        message_type,
+        *,
+        agent=None,
+        request_id=None,
+        payload=None,
+        wait=False,
+    ):
+        with self._state_lock:
+            self._event_sequence += 1
+            event = {
+                "type": str(message_type),
+                "version": self.protocol_version,
+                "event_id": self._event_sequence,
+                "server_session_id": self.server_session_id,
+                "timestamp": time.time(),
+                "payload": dict(payload or {}),
+            }
+            if agent:
+                event["agent"] = str(agent)
+            if request_id:
+                event["request_id"] = str(request_id)
+            self._replay_events.append(event)
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return event
+        future = asyncio.run_coroutine_threadsafe(
+            self._broadcast_event(event),
+            loop,
+        )
+        if wait and threading.get_ident() != self._loop_thread_id:
+            try:
+                future.result(timeout=0.5)
+            except Exception:
+                pass
+        return event
+
+    def supersede_active_request(self, agent, reason):
+        agent_key = normalize_tmux_agent_key(agent)
+        with self._state_lock:
+            active = self._active_requests.pop(agent_key, None)
+        if not active:
+            return None
+        return self.publish_event(
+            "message.completed",
+            agent=active.get("agent") or agent,
+            request_id=active.get("request_id"),
+            payload={
+                "agent": active.get("agent") or agent,
+                "command": active.get("message") or "",
+                "completion_status": "superseded",
+                "completion_message": str(reason or "superseded"),
+                "is_final": True,
+                "phase": "final",
+            },
+        )
+
+    async def _broadcast_event(self, event):
+        clients = list(self._clients)
+        if not clients:
+            return
+        results = await asyncio.gather(
+            *(client.send_json(event) for client in clients),
+            return_exceptions=True,
+        )
+        for client, result in zip(clients, results):
+            if isinstance(result, BaseException):
+                self._clients.discard(client)
+                self._client_acks.pop(id(client), None)
+
+    def publish_summary(self, payload):
+        event_payload = dict(payload or {})
+        agent = str(event_payload.get("agent") or "").strip()
+        agent_key = normalize_tmux_agent_key(agent)
+        detail_lines = format_tmux_summary_detail_lines(
+            event_payload.get("detail_lines") or []
+        )
+        with self._state_lock:
+            previous_lines = self._last_detail_lines.get(agent_key, [])
+            previous = set(previous_lines)
+            incremental_lines = [
+                line for line in detail_lines if line not in previous
+            ]
+            if agent_key:
+                self._last_detail_lines[agent_key] = detail_lines
+            active = self._active_requests.get(agent_key)
+            request_id = active.get("request_id") if active else None
+            is_final = bool(event_payload.get("is_final"))
+            if is_final and active:
+                self._active_requests.pop(agent_key, None)
+        event_payload["detail_lines"] = incremental_lines
+        event_payload["detail"] = format_tmux_summary_detail(incremental_lines)
+        event_payload["detail_line_count"] = len(incremental_lines)
+        return self.publish_event(
+            "message.completed" if is_final else "message.progress",
+            agent=agent,
+            request_id=request_id,
+            payload=event_payload,
+        )
+
+
 def log_voice_api_configuration(config, commands, enabled):
     host, port = get_voice_api_bind(config)
     post_url = build_voice_api_post_url(host, port)
+    websocket_url = build_voice_api_websocket_url(
+        host,
+        port,
+        get_voice_api_websocket_path(config),
+    )
     token = get_voice_api_token(config)
     _index, available = build_api_agent_command_index(commands)
     agent_controls, session_controls = build_api_control_command_labels(commands)
@@ -5870,6 +6619,14 @@ def log_voice_api_configuration(config, commands, enabled):
         else "not configured"
     )
     print(f"[api] auth: {auth_status}", flush=True)
+    if voice_api_websocket_enabled(config):
+        if web is None:
+            print(
+                "[api] WebSocket unavailable because aiohttp is not installed",
+                flush=True,
+            )
+        else:
+            print(f"[api] WebSocket {websocket_url}", flush=True)
     print(
         f"[api] agents: {', '.join(available) if available else 'none configured'}",
         flush=True,
@@ -5956,6 +6713,19 @@ def start_voice_api_server(config, commands):
         log_voice_api_configuration(config, commands, enabled=False)
         return None
     host, port = get_voice_api_bind(config)
+    if web is not None:
+        server = VoiceApiServer(config, commands, host, port)
+        if not server.start():
+            print(
+                f"[api] unable to start local API on {host}:{port}: "
+                f"{server._start_error}",
+                file=sys.stderr,
+            )
+            server.server_close()
+            return None
+        set_active_voice_api_server(server)
+        log_voice_api_configuration(config, commands, enabled=True)
+        return server
     try:
         server = http.server.ThreadingHTTPServer(
             (host, port),
@@ -5968,6 +6738,16 @@ def start_voice_api_server(config, commands):
     thread.start()
     log_voice_api_configuration(config, commands, enabled=True)
     return server
+
+
+def stop_voice_api_server(server):
+    if server is None:
+        return
+    if isinstance(server, VoiceApiServer):
+        server.server_close()
+        return
+    server.shutdown()
+    server.server_close()
 
 
 def get_agent_completion_log_path(config):
@@ -6017,8 +6797,6 @@ def build_agent_completion_summary(record):
 
 
 def dispatch_agent_completion_summary_webhook(config, record):
-    if not get_tmux_summary_webhook_url(config):
-        return None
     agent = str(record.get("agent") or "agent").strip() or "agent"
     if tmux_summary_webhook_agent_excluded(config, agent):
         return None
@@ -7761,9 +8539,9 @@ def run_auto_with_stt_disabled(config, run_mode):
     start_transcript_correction_server_background(config)
     signal_voice_ready(run_mode, "disabled", "stt-disabled")
     log_tmux_summary_webhook_configuration(config)
-    start_auto_tmux_console_log_tailer(config)
-    start_agent_completion_log_tailer(config)
-    start_voice_api_server(config, auto_shell_commands)
+    tmux_console_log_tailer = start_auto_tmux_console_log_tailer(config)
+    agent_completion_log_tailer = start_agent_completion_log_tailer(config)
+    voice_api_server = start_voice_api_server(config, auto_shell_commands)
     print(
         "[auto] STT disabled by --disable-stt; audio listening is permanently "
         "paused and Ctrl resume is disabled.",
@@ -7783,6 +8561,14 @@ def run_auto_with_stt_disabled(config, run_mode):
             time.sleep(3600)
     except KeyboardInterrupt:
         print("\n[auto] stopped.")
+    finally:
+        for stop_event in (
+            tmux_console_log_tailer,
+            agent_completion_log_tailer,
+        ):
+            if stop_event is not None:
+                stop_event.set()
+        stop_voice_api_server(voice_api_server)
 
 
 def click_mouse_left():
@@ -9144,6 +9930,14 @@ def main():
             run_auto_loop()
         except KeyboardInterrupt:
             print("\n[auto] stopped.")
+        finally:
+            for stop_event in (
+                tmux_console_log_tailer,
+                agent_completion_log_tailer,
+                ):
+                    if stop_event is not None:
+                        stop_event.set()
+            stop_voice_api_server(voice_api_server)
         return
 
     signal_voice_ready(run_mode, transcribe_backend, _transcribe_model_label)

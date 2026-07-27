@@ -33,16 +33,18 @@ Do not commit `config.json`, virtualenvs, generated audio, local model caches, p
 
 ## Agent Audio Pipe Integration
 
-- Agent Audio Pipe uses this repository's `POST /messages` API; the
+- Agent Audio Pipe can use this repository's bidirectional `/ws` WebSocket or
+  the backwards-compatible `POST /messages` plus summary webhook flow; the
   `linux-voice-codex` dashboard is not a compatible substitute.
 - For glasses-provided ASR, start this workbench with
   `./run-auto.sh --disable-stt` and keep the API token, API port, agent names,
-  summary webhook URL, and summary token aligned with Agent Audio Pipe.
+  WebSocket path, and any legacy summary webhook settings aligned with Agent
+  Audio Pipe.
 - Prefer copying `.env.agent-audio-pipe.example` to the ignored `.env` for a
   persistent local integration. The template keeps STT disabled, pins the tmux
   session, and keeps the auto/agent console logs under the runtime directory.
 - Keep `auto_enable_terminate_commands` disabled for a persistent API. An
-  enabled terminate phrase kills the tmux session and the API listener on port
-  `8787`. The terminating request may receive an empty response because the
-  server stops before replying, and later callers receive connection failures
-  until restart.
+  enabled terminate phrase sends a `session.terminating` WebSocket event and
+  then kills the tmux session and API listener on port `8787`. Later callers
+  receive connection failures until restart; legacy HTTP callers may still
+  receive an empty response during shutdown.
