@@ -465,6 +465,11 @@ Once the Wolf process binds successfully, its console prints both
 lines are absent, the workbench API is not running and callers will receive a
 connection failure.
 
+The next line prints `[api] WebSocket secret: <token>` so the value can be
+entered in the connecting client. It prints `none required` when API
+authentication is disabled. Because the configured token is visible in the
+voice pane and its logs, protect those logs and use a local-only token.
+
 `run-auto.sh` also loads local defaults from `.env` when that file exists.
 Values supplied explicitly in the shell take precedence over `.env` values.
 For Agent Audio Pipe, start from `.env.agent-audio-pipe.example` so a bare

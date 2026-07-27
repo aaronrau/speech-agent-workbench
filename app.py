@@ -6627,6 +6627,11 @@ def log_voice_api_configuration(config, commands, enabled):
             )
         else:
             print(f"[api] WebSocket {websocket_url}", flush=True)
+            websocket_secret = token or "none required"
+            print(
+                f"[api] WebSocket secret: {websocket_secret}",
+                flush=True,
+            )
     print(
         f"[api] agents: {', '.join(available) if available else 'none configured'}",
         flush=True,
