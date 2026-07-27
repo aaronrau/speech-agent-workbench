@@ -3,7 +3,7 @@ import socket
 import unittest
 from unittest import mock
 
-from aiohttp import ClientSession, WSServerHandshakeError
+from aiohttp import ClientSession, WSMsgType, WSServerHandshakeError
 
 import app
 
@@ -314,16 +314,16 @@ class VoiceApiWebSocketTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        def run_command(command):
-            if command.get("exit_after"):
-                raise SystemExit(0)
-            return True
-
+        command_result = mock.Mock(returncode=0, stdout="", stderr="")
         with mock.patch.object(
             app,
-            "run_auto_shell_command",
-            side_effect=run_command,
-        ):
+            "focus_auto_terminal_window",
+            return_value=True,
+        ), mock.patch.object(
+            app,
+            "run_command",
+            return_value=command_result,
+        ) as run_command:
             async with ClientSession() as session:
                 websocket = await session.ws_connect(
                     f"http://127.0.0.1:{port}/ws"
@@ -340,15 +340,20 @@ class VoiceApiWebSocketTests(unittest.IsolatedAsyncioTestCase):
                 terminating = await websocket.receive_json(timeout=2.0)
                 self.assertEqual(terminating["type"], "session.terminating")
                 self.assertEqual(terminating["request_id"], "terminate-1")
-                accepted = await websocket.receive_json(timeout=2.0)
-                self.assertEqual(accepted["type"], "message.accepted")
-                completed = await websocket.receive_json(timeout=2.0)
-                self.assertEqual(completed["type"], "message.completed")
-                self.assertEqual(
-                    completed["payload"]["completion_status"],
-                    "terminating",
+                closed = await websocket.receive(timeout=2.0)
+                self.assertIn(
+                    closed.type,
+                    (WSMsgType.CLOSE, WSMsgType.CLOSED),
                 )
-                await websocket.close()
+        run_command.assert_called_once_with(
+            ["tmux", "kill-session", "-t", "workbench"],
+            timeout=2.0,
+        )
+        for _attempt in range(20):
+            if not self.server._thread.is_alive():
+                break
+            await asyncio.sleep(0.01)
+        self.assertFalse(self.server._thread.is_alive())
 
 
 class VoiceApiWebSocketConfigTests(unittest.TestCase):

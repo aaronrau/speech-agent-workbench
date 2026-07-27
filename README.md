@@ -538,6 +538,13 @@ events. When the agent invokes
 a `message.completed` event. Both events carry the original `request_id` and
 the existing summary payload under `payload`.
 
+Every valid incoming WebSocket request is also printed in Wolf's console and
+auto log, for example:
+
+```text
+[ws][message][Flux][client-generated-id] pull the latest
+```
+
 Only one active WebSocket request is allowed per agent because completion
 signals identify an agent rather than an individual prompt. A second request
 returns `message.error` with `error: "agent_busy"` and the active request ID.
@@ -608,6 +615,11 @@ header and `VOICE_TMUX_SUMMARY_WEBHOOK_TIMEOUT` to tune the POST timeout.
 The webhook remains fully supported for backwards compatibility. When both
 transports are enabled, summaries are delivered independently to connected
 WebSocket clients and to the configured webhook.
+
+The configured terminate-session command sends `session.terminating`, closes
+the HTTP/WebSocket listener, and then kills the tmux session. This explicitly
+releases the API port even when the listener process is not owned by the tmux
+pane.
 
 ## Notes
 

@@ -437,6 +437,56 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertIn("[api] agent controls: Flux clear terminal", lines)
         self.assertIn("[api] session controls: Wolf terminate session", lines)
 
+    def test_websocket_request_is_printed_to_voice_console(self):
+        request = {
+            "type": "tmux",
+            "agent": "Flux",
+            "message": "run tests\nand report back",
+        }
+
+        with mock.patch("builtins.print") as printed:
+            app.log_voice_websocket_request(request, "request-1")
+
+        printed.assert_called_once_with(
+            "[ws][message][Flux][request-1] run tests and report back",
+            flush=True,
+        )
+
+    def test_terminate_command_closes_active_api_before_tmux_command(self):
+        events = []
+        server = mock.Mock()
+        server.shutdown.side_effect = lambda: events.append("shutdown")
+        server.server_close.side_effect = lambda: events.append("server_close")
+        app.set_active_voice_api_server(server)
+        self.addCleanup(app.set_active_voice_api_server, None)
+        command = {
+            "label": "Wolf terminate session",
+            "argv": ["tmux", "kill-session", "-t", "speech-workbench"],
+            "exit_after": True,
+        }
+        result = mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            app,
+            "focus_auto_terminal_window",
+            return_value=True,
+        ):
+            with mock.patch.object(
+                app,
+                "run_command",
+                side_effect=lambda *_args, **_kwargs: (
+                    events.append("tmux_command") or result
+                ),
+            ):
+                with self.assertRaises(SystemExit):
+                    app.run_auto_shell_command(command)
+
+        self.assertEqual(
+            events,
+            ["shutdown", "server_close", "tmux_command"],
+        )
+        self.assertIsNone(app.get_active_voice_api_server())
+
     def test_route_api_message_to_tmux_runs_exact_control_command(self):
         commands = {
             "wolf": {

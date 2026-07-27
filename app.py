@@ -5980,6 +5980,21 @@ def build_voice_api_websocket_url(host, port, path="/ws"):
     return f"ws://{format_voice_api_url_host(host)}:{int(port)}{path}"
 
 
+def log_voice_websocket_request(api_request, request_id):
+    message_type = "summary" if api_request.get("type") == "local" else "message"
+    agent = summarize_log_text(
+        strip_terminal_control_chars(api_request.get("agent") or ""),
+        limit=80,
+    )
+    message = strip_terminal_control_chars(api_request.get("message") or "")
+    message = " ".join(message.replace("\r", " ").replace("\n", " ").split())
+    message = summarize_log_text(message, limit=2000)
+    print(
+        f"[ws][{message_type}][{agent}][{request_id}] {message}",
+        flush=True,
+    )
+
+
 def get_active_voice_api_server():
     with ACTIVE_VOICE_API_SERVER_LOCK:
         return ACTIVE_VOICE_API_SERVER
@@ -6034,6 +6049,7 @@ class VoiceApiServer:
         self._loop_thread_id = None
         self._runner = None
         self._site = None
+        self._listener_closed = threading.Event()
         self._start_error = None
         self._started = threading.Event()
         self._state_lock = threading.Lock()
@@ -6061,6 +6077,18 @@ class VoiceApiServer:
         except Exception:
             pass
         loop.call_soon_threadsafe(loop.stop)
+
+    def request_shutdown(self, listener_timeout=0.5):
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            self._listener_closed.set()
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._shutdown_and_stop_async(),
+            loop,
+        )
+        if threading.get_ident() != self._loop_thread_id:
+            self._listener_closed.wait(listener_timeout)
 
     def server_close(self):
         self.shutdown()
@@ -6113,6 +6141,11 @@ class VoiceApiServer:
         await self._site.start()
 
     async def _shutdown_async(self):
+        site = self._site
+        self._site = None
+        if site is not None:
+            await site.stop()
+        self._listener_closed.set()
         clients = list(self._clients)
         self._clients.clear()
         if clients:
@@ -6128,9 +6161,16 @@ class VoiceApiServer:
             )
         runner = self._runner
         self._runner = None
-        self._site = None
         if runner is not None:
             await runner.cleanup()
+
+    async def _shutdown_and_stop_async(self):
+        try:
+            await self._shutdown_async()
+        finally:
+            asyncio.get_running_loop().call_soon(
+                asyncio.get_running_loop().stop
+            )
 
     def _connection_ready_payload(self):
         _index, available = build_api_agent_command_index(self.commands)
@@ -6364,6 +6404,7 @@ class VoiceApiServer:
                 request_id=request_id,
             )
             return
+        log_voice_websocket_request(api_request, request_id)
         if api_request["type"] == "local":
             result = await asyncio.to_thread(
                 route_api_local_summary,
@@ -6509,6 +6550,9 @@ class VoiceApiServer:
                 agent=result.get("agent") or api_request["agent"],
                 result=result,
             )
+            return
+        if result.get("terminating"):
+            self._release_request(agent_key, request_id)
             return
         if agent_key:
             with self._state_lock:
@@ -6805,6 +6849,7 @@ def start_voice_api_server(config, commands):
         return None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    set_active_voice_api_server(server)
     log_voice_api_configuration(config, commands, enabled=True)
     return server
 
@@ -6814,9 +6859,26 @@ def stop_voice_api_server(server):
         return
     if isinstance(server, VoiceApiServer):
         server.server_close()
-        return
-    server.shutdown()
-    server.server_close()
+    else:
+        server.shutdown()
+        server.server_close()
+    if get_active_voice_api_server() is server:
+        set_active_voice_api_server(None)
+
+
+def shutdown_active_voice_api_server():
+    server = get_active_voice_api_server()
+    if server is None:
+        return False
+    print("[api] closing message and WebSocket API for session termination.", flush=True)
+    if isinstance(server, VoiceApiServer):
+        server.request_shutdown()
+    else:
+        server.shutdown()
+        server.server_close()
+    if get_active_voice_api_server() is server:
+        set_active_voice_api_server(None)
+    return True
 
 
 def get_agent_completion_log_path(config):
@@ -7981,6 +8043,8 @@ def run_auto_shell_command(command):
         focus_success=focus_success,
         label=label,
     )
+    if command.get("exit_after"):
+        shutdown_active_voice_api_server()
     try:
         result = run_command(argv, timeout=2.0)
     except subprocess.TimeoutExpired:
