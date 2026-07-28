@@ -396,6 +396,26 @@ class VoiceApiWebSocketConfigTests(unittest.TestCase):
         websocket_server.publish_summary.assert_called_once()
         post_webhook.assert_called_once()
 
+    def test_summary_dispatch_uses_websocket_without_configured_webhook(self):
+        websocket_server = mock.Mock(websocket_enabled=True)
+        app.set_active_voice_api_server(websocket_server)
+
+        with mock.patch.object(
+            app,
+            "post_tmux_summary_webhook",
+        ) as post_webhook:
+            thread = app.dispatch_tmux_summary_webhook(
+                {},
+                "Flux",
+                "run tests",
+                "Flux is running tests.",
+                detail_lines=["pytest started"],
+            )
+
+        self.assertIsNone(thread)
+        websocket_server.publish_summary.assert_called_once()
+        post_webhook.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

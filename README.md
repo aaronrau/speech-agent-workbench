@@ -582,6 +582,10 @@ settings are `VOICE_API_WEBSOCKET_ENABLED`,
 `VOICE_API_WEBSOCKET_MAX_MESSAGE_BYTES`, and
 `VOICE_API_WEBSOCKET_REPLAY_EVENTS`.
 
+For WebSocket-only delivery, leave `VOICE_TMUX_SUMMARY_WEBHOOK_URL` and
+`tmux_summary_webhook_url` unset. Progress and completion data still arrive as
+WebSocket events, and the workbench does not attempt an HTTP callback.
+
 ### Summary Webhook Compatibility
 
 Set `VOICE_TMUX_SUMMARY_WEBHOOK_URL` to receive each tmux summary as JSON:
