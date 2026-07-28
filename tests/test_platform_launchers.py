@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 import unittest
 
 
@@ -61,6 +62,52 @@ class PlatformLauncherTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
+
+    def test_run_auto_local_env_preserves_inherited_disable_stt(self):
+        path = os.path.join(self.repo_root, "run-auto.sh")
+        with open(path, encoding="utf-8") as handle:
+            launcher = handle.read()
+        function_start = launcher.index("load_local_env() {")
+        function_end = launcher.index("\n}\n\nload_local_env", function_start) + 2
+        load_local_env_function = launcher[function_start:function_end]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with open(
+                os.path.join(temp_dir, ".env"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                handle.write(
+                    "VOICE_DISABLE_STT=0\n"
+                    "VOICE_TEST_LOCAL_VALUE=loaded\n"
+                )
+            env = os.environ.copy()
+            env.update(
+                {
+                    "TEST_ROOT": temp_dir,
+                    "VOICE_DISABLE_STT": "1",
+                }
+            )
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    load_local_env_function
+                    + '\nROOT="$TEST_ROOT"\n'
+                    + "load_local_env\n"
+                    + 'printf "%s|%s\\n" "$VOICE_DISABLE_STT" '
+                    + '"$VOICE_TEST_LOCAL_VALUE"\n',
+                ],
+                cwd=self.repo_root,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), "1|loaded")
 
     def test_installer_fails_when_tmux_is_missing_after_package_stage(self):
         env = os.environ.copy()

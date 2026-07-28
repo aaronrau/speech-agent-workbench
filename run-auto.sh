@@ -26,7 +26,10 @@ load_local_env() {
 
   local env_snapshot
   env_snapshot="$(mktemp "${TMPDIR:-/tmp}/speech-agent-workbench-env.XXXXXX")"
-  export -p >"$env_snapshot"
+  # `declare -x` creates function-local variables when sourced from here.
+  # Restore with `export` so caller-provided values remain set after this
+  # function returns.
+  export -p | sed 's/^declare -x /export /' >"$env_snapshot"
 
   set -a
   # shellcheck disable=SC1091
