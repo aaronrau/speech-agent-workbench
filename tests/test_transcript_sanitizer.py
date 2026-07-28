@@ -1090,6 +1090,67 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
                 "agent, agent two, agent three, voice",
             )
 
+    def test_disabled_stt_console_uses_colored_agent_names(self):
+        commands = {
+            "flux": {"label": "Flux"},
+            "brock": {"label": "Brock"},
+        }
+        display_words = "flux=32,brock=94,pike=38;5;208,wolf=90"
+
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "VOICE_AUTO_COLOR_NAMES": "1",
+                "VOICE_AUTO_DISPLAY_WORDS": display_words,
+            },
+        ):
+            with mock.patch.object(
+                app,
+                "build_auto_tmux_switch_commands",
+                return_value=commands,
+            ):
+                with mock.patch.object(
+                    app,
+                    "start_transcript_correction_server_background",
+                ), mock.patch.object(
+                    app,
+                    "signal_voice_ready",
+                ), mock.patch.object(
+                    app,
+                    "log_tmux_summary_webhook_configuration",
+                ), mock.patch.object(
+                    app,
+                    "start_auto_tmux_console_log_tailer",
+                    return_value=None,
+                ), mock.patch.object(
+                    app,
+                    "start_agent_completion_log_tailer",
+                    return_value=None,
+                ), mock.patch.object(
+                    app,
+                    "start_voice_api_server",
+                    return_value=None,
+                ), mock.patch.object(
+                    app,
+                    "stop_voice_api_server",
+                ), mock.patch.object(
+                    app.time,
+                    "sleep",
+                    side_effect=KeyboardInterrupt,
+                ), mock.patch(
+                    "builtins.print",
+                ) as printed:
+                    app.run_auto_with_stt_disabled({}, "auto")
+
+        printed.assert_any_call(
+            "[auto] switch words="
+            "\033[32mflux\033[0m, "
+            "\033[94mbrock\033[0m, "
+            "\033[38;5;208mpike\033[0m, "
+            "\033[90mwolf\033[0m",
+            flush=True,
+        )
+
     def test_auto_tmux_switch_commands_build_from_environment(self):
         with mock.patch.dict(
             "os.environ",

@@ -8746,14 +8746,10 @@ def run_auto_with_stt_disabled(config, run_mode):
         flush=True,
     )
     if auto_shell_commands:
-        labels = sorted(
-            {
-                str(command.get("label") or "").strip()
-                for command in auto_shell_commands.values()
-                if command.get("label")
-            }
+        print(
+            "[auto] switch words=" + format_colored_detection_words(),
+            flush=True,
         )
-        print("[auto] switch words=" + ", ".join(labels), flush=True)
     try:
         while True:
             time.sleep(3600)
