@@ -545,6 +545,11 @@ auto log, for example:
 [ws][message][Flux][client-generated-id] pull the latest
 ```
 
+Every outgoing frame is logged there as well. `[ws][send]` means the frame was
+delivered to at least one connected client; `[ws][queue]` means it was retained
+for replay but no client was connected. The log includes the frame type, agent,
+request ID, client count, and a safely truncated single-line JSON payload.
+
 Only one active WebSocket request is allowed per agent because completion
 signals identify an agent rather than an individual prompt. A second request
 returns `message.error` with `error: "agent_busy"` and the active request ID.

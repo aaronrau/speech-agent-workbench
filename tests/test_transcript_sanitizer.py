@@ -452,6 +452,48 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             flush=True,
         )
 
+    def test_websocket_output_is_printed_to_voice_console(self):
+        payload = {
+            "type": "message.progress",
+            "request_id": "request-1",
+            "agent": "Flux",
+            "payload": {
+                "summary": "Tests started.\nWaiting for results.",
+            },
+        }
+
+        with mock.patch("builtins.print") as printed:
+            app.log_voice_websocket_output(
+                payload,
+                recipients=1,
+                attempted=2,
+            )
+
+        printed.assert_called_once_with(
+            '[ws][send][message.progress][Flux][request-1] clients=1/2 '
+            '{"agent":"Flux","payload":{"summary":"Tests started.\\n'
+            'Waiting for results."},"request_id":"request-1",'
+            '"type":"message.progress"}',
+            flush=True,
+        )
+
+    def test_websocket_output_logs_queued_event_without_clients(self):
+        payload = {
+            "type": "message.completed",
+            "agent": "Pike",
+            "request_id": "request-2",
+        }
+
+        with mock.patch("builtins.print") as printed:
+            app.log_voice_websocket_output(payload, recipients=0)
+
+        printed.assert_called_once_with(
+            '[ws][queue][message.completed][Pike][request-2] clients=0 '
+            '{"agent":"Pike","request_id":"request-2",'
+            '"type":"message.completed"}',
+            flush=True,
+        )
+
     def test_terminate_command_closes_active_api_before_tmux_command(self):
         events = []
         server = mock.Mock()

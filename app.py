@@ -5995,6 +5995,53 @@ def log_voice_websocket_request(api_request, request_id):
     )
 
 
+def log_voice_websocket_output(payload, recipients=1, attempted=None):
+    frame = dict(payload or {})
+    message_type = summarize_log_text(
+        strip_terminal_control_chars(frame.get("type") or "unknown"),
+        limit=80,
+    )
+    event_payload = frame.get("payload")
+    if not isinstance(event_payload, dict):
+        event_payload = {}
+    result_payload = frame.get("result")
+    if not isinstance(result_payload, dict):
+        result_payload = {}
+    agent = summarize_log_text(
+        strip_terminal_control_chars(
+            frame.get("agent")
+            or event_payload.get("agent")
+            or result_payload.get("agent")
+            or "-"
+        ),
+        limit=80,
+    )
+    request_id = summarize_log_text(
+        strip_terminal_control_chars(frame.get("request_id") or "-"),
+        limit=128,
+    )
+    recipients = max(0, int(recipients or 0))
+    if attempted is None:
+        attempted = recipients
+    attempted = max(recipients, int(attempted or 0))
+    delivery = "send" if recipients else "queue"
+    count = f"clients={recipients}"
+    if attempted != recipients:
+        count += f"/{attempted}"
+    serialized = json.dumps(
+        frame,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    serialized = summarize_log_text(serialized, limit=4000)
+    print(
+        f"[ws][{delivery}][{message_type}][{agent}][{request_id}] "
+        f"{count} {serialized}",
+        flush=True,
+    )
+
+
 def get_active_voice_api_server():
     with ACTIVE_VOICE_API_SERVER_LOCK:
         return ACTIVE_VOICE_API_SERVER
@@ -6270,7 +6317,10 @@ class VoiceApiServer:
         await websocket.prepare(request)
         self._clients.add(websocket)
         self._client_acks[id(websocket)] = 0
-        await websocket.send_json(self._connection_ready_payload())
+        await self._send_websocket_json(
+            websocket,
+            self._connection_ready_payload(),
+        )
         try:
             async for message in websocket:
                 if message.type == WSMsgType.TEXT:
@@ -6286,6 +6336,10 @@ class VoiceApiServer:
             self._clients.discard(websocket)
             self._client_acks.pop(id(websocket), None)
         return websocket
+
+    async def _send_websocket_json(self, websocket, payload):
+        await websocket.send_json(payload)
+        log_voice_websocket_output(payload)
 
     async def _send_protocol_error(
         self,
@@ -6303,7 +6357,7 @@ class VoiceApiServer:
         if request_id:
             payload["request_id"] = request_id
         payload.update(fields)
-        await websocket.send_json(payload)
+        await self._send_websocket_json(websocket, payload)
 
     async def _handle_websocket_text(self, websocket, text):
         try:
@@ -6344,8 +6398,9 @@ class VoiceApiServer:
                     if int(event.get("event_id") or 0) > event_id
                 ]
             for event in replay:
-                await websocket.send_json(event)
-            await websocket.send_json(
+                await self._send_websocket_json(websocket, event)
+            await self._send_websocket_json(
+                websocket,
                 {
                     "type": "connection.resumed",
                     "version": self.protocol_version,
@@ -6424,7 +6479,7 @@ class VoiceApiServer:
             }
             if not result.get("ok"):
                 response["error"] = result.get("error") or "summary_failed"
-            await websocket.send_json(response)
+            await self._send_websocket_json(websocket, response)
             return
         await self._route_websocket_message(
             websocket,
@@ -6502,7 +6557,7 @@ class VoiceApiServer:
                 }
                 if active.get("result") is not None:
                     response["result"] = active["result"]
-                await websocket.send_json(response)
+                await self._send_websocket_json(websocket, response)
                 return
 
         def before_control_command(command):
@@ -6559,7 +6614,8 @@ class VoiceApiServer:
                 active = self._active_requests.get(agent_key)
                 if active and active.get("request_id") == request_id:
                     active["result"] = dict(result)
-        await websocket.send_json(
+        await self._send_websocket_json(
+            websocket,
             {
                 "type": "message.accepted",
                 "version": self.protocol_version,
@@ -6647,15 +6703,24 @@ class VoiceApiServer:
     async def _broadcast_event(self, event):
         clients = list(self._clients)
         if not clients:
+            log_voice_websocket_output(event, recipients=0)
             return
         results = await asyncio.gather(
             *(client.send_json(event) for client in clients),
             return_exceptions=True,
         )
+        delivered = 0
         for client, result in zip(clients, results):
             if isinstance(result, BaseException):
                 self._clients.discard(client)
                 self._client_acks.pop(id(client), None)
+            else:
+                delivered += 1
+        log_voice_websocket_output(
+            event,
+            recipients=delivered,
+            attempted=len(clients),
+        )
 
     def publish_summary(self, payload):
         event_payload = dict(payload or {})
