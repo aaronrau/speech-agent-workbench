@@ -5432,7 +5432,8 @@ def post_tmux_summary_webhook(
                 record_tmux_webhook_sent_detail_lines(agent_label, sent_detail_lines)
             return success
     except Exception as exc:
-        print(f"[tmux-summary] webhook failed: {exc}", file=sys.stderr)
+        preview = sanitize_delivery_log_preview(exc)
+        print(f"[tmux-summary] webhook failed: {preview}", file=sys.stderr)
         return False
 
 
@@ -5980,19 +5981,55 @@ def build_voice_api_websocket_url(host, port, path="/ws"):
     return f"ws://{format_voice_api_url_host(host)}:{int(port)}{path}"
 
 
+def sanitize_delivery_log_preview(value, limit=150):
+    text = strip_terminal_control_chars(value)
+    text = "".join(
+        character if character.isalnum() or character in (" ", ".") else " "
+        for character in text
+    )
+    text = " ".join(text.split())
+    limit = max(0, int(limit))
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "...."
+
+
 def log_voice_websocket_request(api_request, request_id):
     message_type = "summary" if api_request.get("type") == "local" else "message"
     agent = summarize_log_text(
         strip_terminal_control_chars(api_request.get("agent") or ""),
         limit=80,
     )
-    message = strip_terminal_control_chars(api_request.get("message") or "")
-    message = " ".join(message.replace("\r", " ").replace("\n", " ").split())
-    message = summarize_log_text(message, limit=2000)
+    message = sanitize_delivery_log_preview(api_request.get("message") or "")
     print(
         f"[ws][{message_type}][{agent}][{request_id}] {message}",
         flush=True,
     )
+
+
+def get_voice_websocket_output_preview(frame, event_payload, result_payload):
+    candidates = (
+        frame.get("error"),
+        frame.get("message"),
+        event_payload.get("completion_message"),
+        event_payload.get("summary"),
+        event_payload.get("error"),
+        event_payload.get("message"),
+        event_payload.get("command"),
+        event_payload.get("detail"),
+        result_payload.get("error"),
+        result_payload.get("summary"),
+        result_payload.get("message"),
+        result_payload.get("completion_message"),
+        result_payload.get("detail"),
+    )
+    for candidate in candidates:
+        if candidate not in (None, ""):
+            return sanitize_delivery_log_preview(candidate)
+    agents = frame.get("agents")
+    if isinstance(agents, (list, tuple)) and agents:
+        return sanitize_delivery_log_preview("agents " + " ".join(map(str, agents)))
+    return sanitize_delivery_log_preview(frame.get("type") or "unknown")
 
 
 def log_voice_websocket_output(payload, recipients=1, attempted=None):
@@ -6028,16 +6065,14 @@ def log_voice_websocket_output(payload, recipients=1, attempted=None):
     count = f"clients={recipients}"
     if attempted != recipients:
         count += f"/{attempted}"
-    serialized = json.dumps(
+    preview = get_voice_websocket_output_preview(
         frame,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
+        event_payload,
+        result_payload,
     )
-    serialized = summarize_log_text(serialized, limit=4000)
     print(
         f"[ws][{delivery}][{message_type}][{agent}][{request_id}] "
-        f"{count} {serialized}",
+        f"{count} {preview}",
         flush=True,
     )
 

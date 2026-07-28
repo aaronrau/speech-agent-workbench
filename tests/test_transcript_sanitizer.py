@@ -470,10 +470,8 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             )
 
         printed.assert_called_once_with(
-            '[ws][send][message.progress][Flux][request-1] clients=1/2 '
-            '{"agent":"Flux","payload":{"summary":"Tests started.\\n'
-            'Waiting for results."},"request_id":"request-1",'
-            '"type":"message.progress"}',
+            "[ws][send][message.progress][Flux][request-1] clients=1/2 "
+            "Tests started. Waiting for results.",
             flush=True,
         )
 
@@ -488,9 +486,37 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
             app.log_voice_websocket_output(payload, recipients=0)
 
         printed.assert_called_once_with(
-            '[ws][queue][message.completed][Pike][request-2] clients=0 '
-            '{"agent":"Pike","request_id":"request-2",'
-            '"type":"message.completed"}',
+            "[ws][queue][message.completed][Pike][request-2] clients=0 "
+            "message.completed",
+            flush=True,
+        )
+
+    def test_delivery_log_preview_removes_special_characters_and_truncates(self):
+        preview = app.sanitize_delivery_log_preview(
+            '\033[31mResult <ready> ── "quoted"\n' + ("x" * 200)
+        )
+
+        self.assertEqual(len(preview), 154)
+        self.assertTrue(preview.endswith("...."))
+        self.assertNotIn("\033", preview)
+        self.assertNotIn("<", preview)
+        self.assertNotIn(">", preview)
+        self.assertNotIn("─", preview)
+        self.assertNotIn('"', preview)
+        self.assertNotIn("\n", preview)
+
+    def test_websocket_request_message_is_limited_to_150_characters(self):
+        request = {
+            "type": "tmux",
+            "agent": "Flux",
+            "message": "a" * 200,
+        }
+
+        with mock.patch("builtins.print") as printed:
+            app.log_voice_websocket_request(request, "request-long")
+
+        printed.assert_called_once_with(
+            "[ws][message][Flux][request-long] " + ("a" * 150) + "....",
             flush=True,
         )
 
@@ -819,6 +845,42 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertFalse(payload["is_final"])
         self.assertEqual(payload["phase"], "in_progress")
         self.assertEqual(payload["summary"], "Flux pulled the latest changes.")
+
+    def test_webhook_failure_log_is_sanitized_and_limited(self):
+        config = {
+            "tmux_summary_webhook_url": "http://127.0.0.1:9999/hook",
+        }
+        error = RuntimeError(
+            '\033[31mcallback <failed> ── "private"\n' + ("x" * 200)
+        )
+
+        with mock.patch.object(
+            app.urllib.request,
+            "urlopen",
+            side_effect=error,
+        ), mock.patch(
+            "builtins.print",
+        ) as printed:
+            self.assertFalse(
+                app.post_tmux_summary_webhook(
+                    config,
+                    "Flux",
+                    "run tests",
+                    "Flux ran tests.",
+                )
+            )
+
+        message = printed.call_args.args[0]
+        prefix = "[tmux-summary] webhook failed: "
+        self.assertTrue(message.startswith(prefix))
+        self.assertEqual(len(message.removeprefix(prefix)), 154)
+        self.assertTrue(message.endswith("...."))
+        self.assertNotIn("\033", message)
+        self.assertNotIn("<", message)
+        self.assertNotIn(">", message)
+        self.assertNotIn("─", message)
+        self.assertNotIn('"', message)
+        self.assertNotIn("\n", message)
 
     def test_post_tmux_summary_webhook_sends_only_new_detail_lines(self):
         app.TMUX_WEBHOOK_LAST_DETAIL_LINES.clear()

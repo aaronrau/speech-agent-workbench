@@ -548,7 +548,8 @@ auto log, for example:
 Every outgoing frame is logged there as well. `[ws][send]` means the frame was
 delivered to at least one connected client; `[ws][queue]` means it was retained
 for replay but no client was connected. The log includes the frame type, agent,
-request ID, client count, and a safely truncated single-line JSON payload.
+request ID, client count, and a plain-text message preview. Control and special
+characters are removed, and previews longer than 150 characters end in `....`.
 
 Only one active WebSocket request is allowed per agent because completion
 signals identify an agent rather than an individual prompt. A second request
