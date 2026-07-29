@@ -586,7 +586,11 @@ WebSockets are enabled whenever the message API is enabled. The relevant
 settings are `VOICE_API_WEBSOCKET_ENABLED`,
 `VOICE_API_WEBSOCKET_PATH`, `VOICE_API_WEBSOCKET_HEARTBEAT_SECONDS`,
 `VOICE_API_WEBSOCKET_MAX_MESSAGE_BYTES`, and
-`VOICE_API_WEBSOCKET_REPLAY_EVENTS`.
+`VOICE_API_WEBSOCKET_REPLAY_EVENTS`. Active requests expire after 15 minutes
+without a progress or completion event by default; configure this with
+`VOICE_API_WEBSOCKET_REQUEST_IDLE_TIMEOUT_SECONDS`. A value of `0` disables
+expiry. Agent and session control commands bypass `agent_busy` and supersede
+the active request, so recovery and termination controls always remain usable.
 
 For WebSocket-only delivery, leave `VOICE_TMUX_SUMMARY_WEBHOOK_URL` and
 `tmux_summary_webhook_url` unset. Progress and completion data still arrive as

@@ -173,6 +173,25 @@ class VoiceApiWebSocketTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(busy["error"], "agent_busy")
                 self.assertEqual(busy["active_request_id"], "request-1")
 
+                await websocket.send_json(
+                    {
+                        "type": "message.send",
+                        "request_id": "pike-request-1",
+                        "agent": "Pike",
+                        "message": "work independently",
+                    }
+                )
+                pike_accepted = await websocket.receive_json(timeout=2.0)
+                self.assertEqual(pike_accepted["type"], "message.accepted")
+                self.assertEqual(
+                    pike_accepted["request_id"],
+                    "pike-request-1",
+                )
+                self.assertEqual(
+                    pike_accepted["result"]["agent"],
+                    "Pike",
+                )
+
                 app.dispatch_tmux_summary_webhook(
                     config,
                     "Flux",
@@ -323,7 +342,11 @@ class VoiceApiWebSocketTests(unittest.IsolatedAsyncioTestCase):
             app,
             "run_command",
             return_value=command_result,
-        ) as run_command:
+        ) as run_command, mock.patch.object(
+            app,
+            "send_text_to_tmux_target",
+            return_value=True,
+        ):
             async with ClientSession() as session:
                 websocket = await session.ws_connect(
                     f"http://127.0.0.1:{port}/ws"
@@ -332,22 +355,62 @@ class VoiceApiWebSocketTests(unittest.IsolatedAsyncioTestCase):
                 await websocket.send_json(
                     {
                         "type": "message.send",
+                        "request_id": "wolf-active",
+                        "agent": "Wolf",
+                        "message": "keep working",
+                    }
+                )
+                accepted = await websocket.receive_json(timeout=2.0)
+                self.assertEqual(accepted["type"], "message.accepted")
+                await websocket.send_json(
+                    {
+                        "type": "message.send",
                         "request_id": "terminate-1",
                         "agent": "Wolf",
                         "message": "terminate session",
                     }
                 )
-                terminating = await websocket.receive_json(timeout=2.0)
+                frames = []
+                while True:
+                    frame = await websocket.receive(timeout=2.0)
+                    if frame.type == WSMsgType.TEXT:
+                        payload = frame.json()
+                        frames.append(payload)
+                        if payload.get("type") == "session.terminating":
+                            break
+                        continue
+                    self.fail(
+                        "WebSocket closed before session.terminating: "
+                        f"{frames}"
+                    )
+                terminating = next(
+                    frame
+                    for frame in frames
+                    if frame.get("type") == "session.terminating"
+                )
                 self.assertEqual(terminating["type"], "session.terminating")
                 self.assertEqual(terminating["request_id"], "terminate-1")
+                superseded = next(
+                    frame
+                    for frame in frames
+                    if frame.get("type") == "message.completed"
+                )
+                self.assertEqual(superseded["request_id"], "wolf-active")
+                self.assertEqual(
+                    superseded["payload"]["completion_status"],
+                    "superseded",
+                )
                 closed = await websocket.receive(timeout=2.0)
                 self.assertIn(
                     closed.type,
                     (WSMsgType.CLOSE, WSMsgType.CLOSED),
                 )
-        run_command.assert_called_once_with(
-            ["tmux", "kill-session", "-t", "workbench"],
-            timeout=2.0,
+        self.assertEqual(
+            run_command.call_args_list[-1],
+            mock.call(
+                ["tmux", "kill-session", "-t", "workbench"],
+                timeout=2.0,
+            ),
         )
         for _attempt in range(20):
             if not self.server._thread.is_alive():

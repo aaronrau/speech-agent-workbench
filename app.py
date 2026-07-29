@@ -164,6 +164,7 @@ DEFAULT_CONFIG = {
     "api_websocket_max_message_bytes": 65536,
     "api_websocket_path": "/ws",
     "api_websocket_replay_events": 100,
+    "api_websocket_request_idle_timeout_seconds": 900.0,
     "tmux_summary_webhook_url": None,
     "tmux_summary_webhook_token": None,
     "tmux_summary_webhook_timeout": 5.0,
@@ -6114,6 +6115,13 @@ class VoiceApiServer:
             DEFAULT_CONFIG["api_websocket_max_message_bytes"],
             minimum=1024,
         )
+        self.websocket_request_idle_timeout_seconds = get_config_float(
+            config,
+            "VOICE_API_WEBSOCKET_REQUEST_IDLE_TIMEOUT_SECONDS",
+            "api_websocket_request_idle_timeout_seconds",
+            DEFAULT_CONFIG["api_websocket_request_idle_timeout_seconds"],
+            minimum=0.0,
+        )
         replay_events = get_config_int(
             config,
             "VOICE_API_WEBSOCKET_REPLAY_EVENTS",
@@ -6556,6 +6564,54 @@ class VoiceApiServer:
             if current and current.get("request_id") == request_id:
                 self._active_requests.pop(agent_key, None)
 
+    def _expire_inactive_request(self, agent_key):
+        timeout = self.websocket_request_idle_timeout_seconds
+        if not agent_key or timeout <= 0:
+            return None
+        now = time.time()
+        with self._state_lock:
+            active = self._active_requests.get(agent_key)
+            if not active:
+                return None
+            last_activity = float(active.get("timestamp") or 0.0)
+            if now - last_activity < timeout:
+                return None
+            expired = self._active_requests.pop(agent_key)
+        self.publish_event(
+            "message.completed",
+            agent=expired.get("agent"),
+            request_id=expired.get("request_id"),
+            payload={
+                "agent": expired.get("agent"),
+                "command": expired.get("message") or "",
+                "completion_status": "timed_out",
+                "completion_message": (
+                    f"no progress or completion for {timeout:g} seconds"
+                ),
+                "is_final": True,
+                "phase": "final",
+            },
+        )
+        return expired
+
+    def _match_direct_control_command(self, api_request):
+        agent = api_request.get("agent") or ""
+        message = api_request.get("message") or ""
+        control_text = f"{agent} {message}".strip()
+        control_command = safe_match_auto_shell_command(
+            control_text,
+            self.commands,
+        )
+        if control_command is None:
+            return None
+        index, _available = build_api_agent_command_index(self.commands)
+        agent_command = index.get(normalize_voice_command_text(agent))
+        if control_command is agent_command:
+            return None
+        if control_command.get("tmux_send_text") or control_command.get("exit_after"):
+            return control_command
+        return None
+
     async def _route_websocket_message(
         self,
         websocket,
@@ -6565,7 +6621,14 @@ class VoiceApiServer:
         agent_key, agent_label = self._resolve_request_agent(
             api_request["agent"]
         )
-        if agent_key:
+        control_command = self._match_direct_control_command(api_request)
+        if agent_key and control_command is not None:
+            self.supersede_active_request(
+                agent_label,
+                reason=control_command.get("label") or "control_command",
+            )
+        elif agent_key:
+            self._expire_inactive_request(agent_key)
             active, reservation = self._reserve_request(
                 agent_key,
                 request_id,
@@ -6777,6 +6840,8 @@ class VoiceApiServer:
             is_final = bool(event_payload.get("is_final"))
             if is_final and active:
                 self._active_requests.pop(agent_key, None)
+            elif active:
+                active["timestamp"] = time.time()
         event_payload["detail_lines"] = incremental_lines
         event_payload["detail"] = format_tmux_summary_detail(incremental_lines)
         event_payload["detail_line_count"] = len(incremental_lines)

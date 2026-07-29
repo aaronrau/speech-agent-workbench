@@ -56,6 +56,7 @@
   "api_websocket_max_message_bytes": 65536,
   "api_websocket_path": "/ws",
   "api_websocket_replay_events": 100,
+  "api_websocket_request_idle_timeout_seconds": 900.0,
   "backend_retry_cooldown": 300,
   "channels": 1,
   "chunk_pause_window_seconds": 1.0,
