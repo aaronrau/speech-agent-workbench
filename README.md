@@ -551,13 +551,14 @@ for replay but no client was connected. The log includes the frame type, agent,
 request ID, client count, and a plain-text message preview. Control and special
 characters are removed, and previews longer than 150 characters end in `....`.
 
-Only one active WebSocket request is allowed per agent because completion
-signals identify an agent rather than an individual prompt. A second request
-returns `message.error` with `error: "agent_busy"` and the active request ID.
-HTTP requests retain their existing behavior. If an HTTP request targets an
-agent with an active WebSocket request, the HTTP message is still routed and
-the WebSocket request receives a final `superseded` event so a later completion
-cannot be correlated to the wrong prompt.
+Only the latest WebSocket request remains active for an agent because completion
+signals identify an agent rather than an individual prompt. A newer request is
+routed immediately and the prior request receives a final `superseded` event.
+This permits follow-up or steering prompts even when an agent did not emit an
+explicit completion signal. HTTP requests retain their existing behavior. If an
+HTTP request targets an agent with an active WebSocket request, the HTTP message
+is also routed and the WebSocket request receives the same final `superseded`
+event.
 
 Request a read-only on-demand summary without starting an active agent request:
 
@@ -589,8 +590,8 @@ settings are `VOICE_API_WEBSOCKET_ENABLED`,
 `VOICE_API_WEBSOCKET_REPLAY_EVENTS`. Active requests expire after 15 minutes
 without a progress or completion event by default; configure this with
 `VOICE_API_WEBSOCKET_REQUEST_IDLE_TIMEOUT_SECONDS`. A value of `0` disables
-expiry. Agent and session control commands bypass `agent_busy` and supersede
-the active request, so recovery and termination controls always remain usable.
+expiry. New prompts and agent or session control commands supersede the active
+request, so follow-up, recovery, and termination commands remain usable.
 
 For WebSocket-only delivery, leave `VOICE_TMUX_SUMMARY_WEBHOOK_URL` and
 `tmux_summary_webhook_url` unset. Progress and completion data still arrive as

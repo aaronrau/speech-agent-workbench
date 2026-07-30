@@ -6544,7 +6544,6 @@ class VoiceApiServer:
             if existing:
                 if existing.get("request_id") == request_id:
                     return existing, "duplicate"
-                return existing, "busy"
             record = {
                 "agent": agent_label,
                 "message": str(message or ""),
@@ -6554,7 +6553,7 @@ class VoiceApiServer:
             }
             self._active_requests[agent_key] = record
             self._last_detail_lines.pop(agent_key, None)
-            return record, "new"
+            return (existing, "superseded") if existing else (record, "new")
 
     def _release_request(self, agent_key, request_id):
         if not agent_key:
@@ -6635,15 +6634,11 @@ class VoiceApiServer:
                 agent_label,
                 api_request["message"],
             )
-            if reservation == "busy":
-                await self._send_protocol_error(
-                    websocket,
-                    "agent_busy",
-                    request_id=request_id,
-                    agent=agent_label,
-                    active_request_id=active.get("request_id"),
+            if reservation == "superseded":
+                self._publish_superseded_request(
+                    active,
+                    reason="newer_websocket_request",
                 )
-                return
             if reservation == "duplicate":
                 response = {
                     "type": "message.accepted",
@@ -6784,12 +6779,16 @@ class VoiceApiServer:
             active = self._active_requests.pop(agent_key, None)
         if not active:
             return None
+        return self._publish_superseded_request(active, reason, agent)
+
+    def _publish_superseded_request(self, active, reason, fallback_agent=None):
+        agent = active.get("agent") or fallback_agent
         return self.publish_event(
             "message.completed",
-            agent=active.get("agent") or agent,
+            agent=agent,
             request_id=active.get("request_id"),
             payload={
-                "agent": active.get("agent") or agent,
+                "agent": agent,
                 "command": active.get("message") or "",
                 "completion_status": "superseded",
                 "completion_message": str(reason or "superseded"),

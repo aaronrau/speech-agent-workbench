@@ -116,7 +116,9 @@ class VoiceApiWebSocketTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await websocket.close()
 
-    async def test_progress_completion_busy_and_replay_are_correlated(self):
+    async def test_progress_supersession_completion_and_replay_are_correlated(
+        self,
+    ):
         config, _commands, port = self.start_server()
         headers = {"Authorization": "Bearer local-secret"}
         url = f"http://127.0.0.1:{port}"
@@ -168,10 +170,33 @@ class VoiceApiWebSocketTests(unittest.IsolatedAsyncioTestCase):
                         "message": "start another task",
                     }
                 )
-                busy = await websocket.receive_json(timeout=2.0)
-                self.assertEqual(busy["type"], "message.error")
-                self.assertEqual(busy["error"], "agent_busy")
-                self.assertEqual(busy["active_request_id"], "request-1")
+                replacement_frames = [
+                    await websocket.receive_json(timeout=2.0),
+                    await websocket.receive_json(timeout=2.0),
+                ]
+                superseded = next(
+                    frame
+                    for frame in replacement_frames
+                    if frame["type"] == "message.completed"
+                )
+                self.assertEqual(superseded["request_id"], "request-1")
+                self.assertEqual(
+                    superseded["payload"]["completion_status"],
+                    "superseded",
+                )
+                self.assertEqual(
+                    superseded["payload"]["completion_message"],
+                    "newer_websocket_request",
+                )
+                replacement_accepted = next(
+                    frame
+                    for frame in replacement_frames
+                    if frame["type"] == "message.accepted"
+                )
+                self.assertEqual(
+                    replacement_accepted["request_id"],
+                    "request-2",
+                )
 
                 await websocket.send_json(
                     {
@@ -195,13 +220,13 @@ class VoiceApiWebSocketTests(unittest.IsolatedAsyncioTestCase):
                 app.dispatch_tmux_summary_webhook(
                     config,
                     "Flux",
-                    "run tests",
-                    "Flux started the tests.",
+                    "start another task",
+                    "Flux started another task.",
                     detail_lines=["pytest started"],
                 )
                 progress = await websocket.receive_json(timeout=2.0)
                 self.assertEqual(progress["type"], "message.progress")
-                self.assertEqual(progress["request_id"], "request-1")
+                self.assertEqual(progress["request_id"], "request-2")
                 self.assertEqual(
                     progress["payload"]["detail_lines"],
                     ["pytest started"],
@@ -232,7 +257,7 @@ class VoiceApiWebSocketTests(unittest.IsolatedAsyncioTestCase):
                 )
                 completion = await resumed_websocket.receive_json(timeout=2.0)
                 self.assertEqual(completion["type"], "message.completed")
-                self.assertEqual(completion["request_id"], "request-1")
+                self.assertEqual(completion["request_id"], "request-2")
                 self.assertTrue(completion["payload"]["is_final"])
                 self.assertEqual(
                     completion["payload"]["completion_status"],
