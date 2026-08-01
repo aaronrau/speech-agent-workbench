@@ -37,6 +37,10 @@ class DefaultConfigTests(unittest.TestCase):
             [agent["name"] for agent in config["agent_workbench"]["agents"]],
             ["Flux", "Brock", "Pike"],
         )
+        self.assertEqual(
+            [agent["path"] for agent in config["agent_workbench"]["agents"]],
+            ["~/", "~/", "~/"],
+        )
         self.assertEqual(config["agent_workbench"]["voice"]["name"], "Wolf")
         self.assertTrue(config["auto_enable_terminate_commands"])
         self.assertEqual(

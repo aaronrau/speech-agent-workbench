@@ -1164,6 +1164,13 @@ class Recorder:
             return samples, total
 
 
+def get_default_config_path():
+    config_home = str(os.environ.get("XDG_CONFIG_HOME") or "").strip()
+    if not config_home:
+        config_home = os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(config_home, "speech-agent-workbench", "config.json")
+
+
 def load_config(path):
     if not os.path.exists(path):
         return DEFAULT_CONFIG.copy()
@@ -1175,6 +1182,9 @@ def load_config(path):
 
 
 def save_config(path, config):
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2, sort_keys=True)
         handle.write("\n")
@@ -8893,7 +8903,9 @@ def click_mouse_left():
 
 def main():
     runtime_args = apply_runtime_cli_flags()
-    config_path = os.environ.get("VOICE_HOTKEY_CONFIG", "config.json")
+    config_path = os.path.expanduser(
+        os.environ.get("VOICE_HOTKEY_CONFIG") or get_default_config_path()
+    )
     config = load_config(config_path)
     if "--configure-macos-inputs" in runtime_args:
         prompt_for_device(config_path, config, step_label="Step 1/2:")

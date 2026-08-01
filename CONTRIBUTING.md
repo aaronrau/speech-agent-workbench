@@ -8,11 +8,12 @@ Thanks for taking the time to improve `speech-agent-workbench`.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp config.example.json config.json
+WORKBENCH_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/speech-agent-workbench"
+mkdir -p "$WORKBENCH_CONFIG_DIR"
+cp config.example.json "$WORKBENCH_CONFIG_DIR/config.json"
 ```
 
-Keep machine-specific settings in `config.json`; it is intentionally ignored by
-git.
+Keep machine-specific settings in the user config outside the repository.
 
 ## Tests
 

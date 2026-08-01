@@ -19,6 +19,8 @@ if [[ "${VOICE_RUN_PLATFORM_DISPATCHED:-0}" != "1" ]]; then
 fi
 
 VENV_ROOT="${VOICE_VENV:-$ROOT/.venv}"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/config-path.sh"
 export PATH="$VENV_ROOT/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 PYTHON_BIN="$VENV_ROOT/bin/python"
 VAD_MODEL="${VOICE_AUTO_SHERPA_VAD_MODEL:-$ROOT/models/silero_vad.onnx}"
@@ -44,7 +46,7 @@ else
 fi
 
 export PYTHONUNBUFFERED=1
-export VOICE_HOTKEY_CONFIG="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
+export VOICE_HOTKEY_CONFIG="${VOICE_HOTKEY_CONFIG:-$(default_voice_config_path)}"
 export VOICE_REMOTE_URL="${VOICE_REMOTE_URL:-http://127.0.0.1:8765/transcribe}"
 export VOICE_DEFAULT_TRANSCRIBE_BACKEND="${VOICE_DEFAULT_TRANSCRIBE_BACKEND:-parakeet-onnx}"
 export VOICE_FALLBACK_BACKEND="${VOICE_FALLBACK_BACKEND:-parakeet-onnx}"
@@ -500,6 +502,7 @@ def configured_path(env_name, config_name, default):
 def resolve_path(value, *, executable=False):
     if not value:
         return ""
+    value = os.path.expanduser(str(value))
     if os.path.isabs(value):
         return value
     if os.sep not in value:

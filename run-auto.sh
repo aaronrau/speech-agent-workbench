@@ -51,7 +51,9 @@ load_local_env
 
 "$ROOT/scripts/ensure-tmux.sh"
 
-CONFIG_PATH="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/config-path.sh"
+CONFIG_PATH="${VOICE_HOTKEY_CONFIG:-$(default_voice_config_path)}"
 export VOICE_HOTKEY_CONFIG="$CONFIG_PATH"
 VAD_MODEL="${VOICE_AUTO_SHERPA_VAD_MODEL:-$ROOT/models/silero_vad.onnx}"
 VAD_URL="${VOICE_AUTO_SHERPA_VAD_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx}"

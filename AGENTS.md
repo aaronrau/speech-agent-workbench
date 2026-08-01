@@ -2,13 +2,12 @@
 
 ## Project Structure & Module Organization
 
-`app.py` is the main Python entry point for voice capture, transcription, and agent routing. Shell launchers live at the repository root: `run.sh` starts the voice app, `run-auto.sh` starts the tmux workbench flow, and `start-agent-workbench.sh` manages panes and agent sessions. Install/setup helpers are `install.sh` and `setup.sh`. Tests live in `tests/` and use Python `unittest`. Runtime assets include `models/silero_vad.onnx` and local Parakeet/Sherpa model files; private runtime state belongs in `config.json`, `.venv/`, caches, or ignored generated files.
+`app.py` is the main Python entry point for voice capture, transcription, and agent routing. Shell launchers live at the repository root: `run.sh` starts the voice app, `run-auto.sh` starts the tmux workbench flow, and `start-agent-workbench.sh` manages panes and agent sessions. Install/setup helpers are `install.sh` and `setup.sh`. Tests live in `tests/` and use Python `unittest`. Runtime assets include `models/silero_vad.onnx` and local Parakeet/Sherpa model files; the private runtime config belongs under `${XDG_CONFIG_HOME:-$HOME/.config}/speech-agent-workbench/`, while virtualenvs, caches, and generated assets remain ignored.
 
 ## Build, Test, and Development Commands
 
-- `./install.sh`: creates/repairs the local `.venv` and installs runtime dependencies.
+- `./install.sh`: creates/repairs `.venv`, installs runtime dependencies, and seeds the user config when missing.
 - `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`: manual dependency setup.
-- `cp config.example.json config.json`: creates a local editable config file.
 - `./run.sh`: runs the voice command app.
 - `./run-auto.sh`: starts the agent workbench and performs model preflight/download work.
 - `make test`: runs `python -m unittest discover -s tests -t .`.
@@ -29,7 +28,7 @@ Recent commits use short imperative summaries, for example `Default voice backen
 
 ## Security & Configuration Tips
 
-Do not commit `config.json`, virtualenvs, generated audio, local model caches, private paths, or credentials. Prefer `config.example.json` for shareable defaults. If a change downloads models, log the target cache directory and keep downloads resumable through the normal Hugging Face or ONNX tooling.
+Do not commit user configs, virtualenvs, generated audio, local model caches, private paths, or credentials. Prefer `config.example.json` for shareable defaults. If a change downloads models, log the target cache directory and keep downloads resumable through the normal Hugging Face or ONNX tooling.
 
 ## Agent Audio Pipe Integration
 

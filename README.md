@@ -12,7 +12,7 @@ matching implementation automatically.
 
 | Task | Command |
 | --- | --- |
-| Install dependencies, create `.venv`, create `config.json`, and prefetch the default STT model | `./install.sh` |
+| Install dependencies, create `.venv`, create the user config, and prefetch the default STT model | `./install.sh` |
 | Install every optional transcription backend | `VOICE_INSTALL_FULL_REQUIREMENTS=1 ./install.sh` |
 | Run plain voice dictation in the currently focused app | `./run.sh` |
 | Start the tmux agent workbench with local microphone/STT | `./run-auto.sh` |
@@ -32,7 +32,7 @@ used after dependency and model preflight.
 ### Spoken and Keyboard Commands
 
 The examples below use the default agents `Flux`, `Brock`, and `Pike`. Agent
-names and aliases come from `agent_workbench.agents` in `config.json`.
+names and aliases come from `agent_workbench.agents` in the user config.
 
 | Say or press | Result |
 | --- | --- |
@@ -159,11 +159,13 @@ it as a fun local script for trying ideas quickly.
 
 The installer detects Linux or macOS, creates `.venv`, installs the matching
 system and Python dependencies (including `llama-cli` and `llama-server`),
-creates `config.json` from `config.example.json`, and downloads and validates
-the default Parakeet ONNX STT model. The public launch commands perform the
-same OS detection and preserve their existing arguments and environment
-overrides. Installation fails with a platform-specific recovery command if
-`tmux` is not executable after the system-package stage.
+creates `~/.config/speech-agent-workbench/config.json` from
+`config.example.json`, and downloads and validates the default Parakeet ONNX
+STT model. `XDG_CONFIG_HOME` replaces `~/.config` when set, and
+`VOICE_HOTKEY_CONFIG` can override the complete path. The public launch
+commands perform the same OS detection and preserve their existing arguments
+and environment overrides. Installation fails with a platform-specific
+recovery command if `tmux` is not executable after the system-package stage.
 
 The Parakeet files are stored in the normal Hugging Face cache. Set
 `VOICE_INSTALL_STT_MODEL=0` to skip the model prefetch, or
@@ -213,7 +215,7 @@ VOICE_AUTO_MACOS_TERMINAL_APP=Ghostty ./run-auto.sh
 
 On an interactive macOS workbench launch, the launcher lists the available
 Core Audio inputs and offers to remap the pause/resume key before tmux starts.
-Both selections are saved in `config.json`; set
+Both selections are saved in the user config; set
 `VOICE_MACOS_INPUT_PROMPT=0` to skip these prompts.
 
 To skip system packages:
@@ -229,7 +231,12 @@ downloads. Set `VOICE_INSTALL_FULL_REQUIREMENTS=1` to install every backend in
 
 ## Configure
 
-Edit `config.json`.
+Edit `~/.config/speech-agent-workbench/config.json`. If `XDG_CONFIG_HOME` is
+set, edit `$XDG_CONFIG_HOME/speech-agent-workbench/config.json` instead. The app
+does not use a repository-local `config.json` unless its path is explicitly
+provided with `VOICE_HOTKEY_CONFIG`. Prefer portable home-relative values such
+as `~/Code/project` instead of user-specific paths such as
+`/home/alice/Code/project`.
 
 Important fields:
 
@@ -264,12 +271,12 @@ It also treats `length view`, `lang fuse`, and similar phonetic variants as
 default agent routes include voice-friendly aliases such as `flex` for `Flux`,
 `block` for `Brock`, and `pipe` for `Pike`.
 
-For model-based cleanup with llama.cpp, add values like these to your local
-`config.json`. These are examples; keep your real local paths and runtime
-settings in `config.json`, which is git-ignored.
+For model-based cleanup with llama.cpp, add values like these to your user
+config. These are examples; keep your real local paths and runtime settings in
+the user config outside the repository.
 The complete correction policy is an in-code runtime default and is mirrored in
 `config.example.json` under `transcript_correction_prompt`. Override that value
-in local `config.json` or with `VOICE_TRANSCRIPT_CORRECTION_PROMPT` only when
+in the user config or with `VOICE_TRANSCRIPT_CORRECTION_PROMPT` only when
 custom correction behavior is required.
 
 ```json
@@ -356,7 +363,7 @@ commands such as yes, no, send, save, or stop.
 
 The run script defaults the local recognizer to `parakeet-onnx`. Set
 `VOICE_TRANSCRIBE_BACKEND` to choose another backend, or set
-`VOICE_DEFAULT_TRANSCRIBE_BACKEND=off` to use the value from `config.json`.
+`VOICE_DEFAULT_TRANSCRIBE_BACKEND=off` to use the value from the user config.
 When `parakeet-onnx` is selected, startup preloads the model so a missing model
 downloads before listening starts. Set `VOICE_PARAKEET_ONNX_DOWNLOAD=off` to
 skip that preload.
@@ -412,7 +419,7 @@ values.
 On interactive launch, the workbench script shows the saved agent command,
 pane names, and paths. The default names are `Flux`, `Brock`, `Pike`, and the
 `Wolf` voice pane. Accept the defaults or update them. The values are saved in
-`config.json`.
+the user config.
 When launched through `./run-auto.sh`, model downloads and enabled
 transcript-correction assets are checked in the foreground before tmux starts so
 download/cache logs are visible. Set `VOICE_AUTO_PREFETCH_MODELS=off` to skip

@@ -10,7 +10,7 @@ Experimental local testbed for voice-driven human-agent interaction. Not product
 
 ## Commands
 
-- `./install.sh` — create `.venv`, install Python deps from `requirements.txt`, install apt packages, and seed `config.json` from `config.example.json`. Use `INSTALL_SYSTEM_DEPS=0 ./install.sh` to skip apt.
+- `./install.sh` — create `.venv`, install Python deps from `requirements.txt`, install apt packages, and seed the user config from `config.example.json`. Use `INSTALL_SYSTEM_DEPS=0 ./install.sh` to skip apt.
 - `./run.sh` — plain dictation mode. Self-heals `.venv` and installs the default Parakeet ONNX runtime if packages are missing. Set `VOICE_INSTALL_FULL_REQUIREMENTS=1` to install every backend in `requirements.txt`. Set `VOICE_PREFETCH_ONLY=1` to download models and exit.
 - `./run-auto.sh` — agent workbench mode. Prefetches voice models in the foreground, then `exec`s `start-agent-workbench.sh` (which in turn launches `run.sh` inside a tmux pane). Set `VOICE_AUTO_PREFETCH_MODELS=off` to skip the foreground download check.
 - `./start-agent-workbench.sh` — builds the tmux session directly (3 agent panes + 1 voice pane). Used by `run-auto.sh`; rarely invoked alone.
@@ -51,7 +51,7 @@ Backends share a `transcribe_audio(samples)` callable produced by `build_transcr
 
 ### Config
 
-`config.json` is git-ignored and the only file the app reads at runtime. `config.example.json` is the shareable defaults. `agent_workbench` is the current key; `codex_agents` is the legacy key and is read as a fallback in both shell launchers and is documented in `tests/test_workbench_config.py`. Most settings can be overridden by `VOICE_*` environment variables of the same name (uppercased) — see `get_config_string/float/int` and the `VOICE_*` blocks in `run.sh` / `run-auto.sh`.
+The runtime config is `~/.config/speech-agent-workbench/config.json`, or `$XDG_CONFIG_HOME/speech-agent-workbench/config.json` when set. `VOICE_HOTKEY_CONFIG` overrides the complete path. `config.example.json` is the shareable defaults. `agent_workbench` is the current key; `codex_agents` is the legacy key and is read as a fallback in both shell launchers and is documented in `tests/test_workbench_config.py`. Most settings can be overridden by `VOICE_*` environment variables of the same name (uppercased) — see `get_config_string/float/int` and the `VOICE_*` blocks in `run.sh` / `run-auto.sh`.
 
 ## Conventions
 
@@ -59,5 +59,5 @@ Backends share a `transcribe_audio(samples)` callable produced by `build_transcr
 - Bash launchers: explicit, quote paths, prefix status output with `[run]`, `[auto]`, or `[hotkey]`.
 - Environment variables: uppercase, `VOICE_*` prefix (`VOICE_TRANSCRIBE_BACKEND`, `VOICE_RUN_MODE`, etc.).
 - Tests: stdlib `unittest`, deterministic, no real microphone/tmux/network. New backend or parsing logic should land with a unit test in `tests/test_*.py`.
-- Do not commit `config.json`, model files, `.wav` captures, `.venv/`, or `transcript-history*.txt` (already in `.gitignore`).
+- Do not commit user configs, model files, `.wav` captures, `.venv/`, or `transcript-history*.txt`.
 - When a change downloads a model, log the target cache directory and keep downloads resumable through normal Hugging Face / ONNX tooling.

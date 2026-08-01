@@ -19,6 +19,9 @@ if [[ "${VOICE_INSTALL_PLATFORM_DISPATCHED:-0}" != "1" ]]; then
 fi
 
 VENV_DIR="${VOICE_VENV:-$ROOT/.venv}"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/config-path.sh"
+CONFIG_PATH="${VOICE_HOTKEY_CONFIG:-$(default_voice_config_path)}"
 
 install_system_deps() {
   if [[ "${VOICE_PLATFORM:-linux}" == "macos" ]]; then
@@ -174,7 +177,7 @@ install_stt_model() {
 
   "$VENV_DIR/bin/python" "$ROOT/scripts/prefetch_stt_model.py" \
     --repo-root "$ROOT" \
-    --config "$ROOT/config.json"
+    --config "$CONFIG_PATH"
 }
 
 if [[ "${INSTALL_SYSTEM_DEPS:-1}" != "0" ]]; then
@@ -222,9 +225,10 @@ esac
 export PATH="$VENV_DIR/bin:$PATH"
 install_llama_cpp
 
-if [[ ! -f "$ROOT/config.json" ]]; then
-  cp "$ROOT/config.example.json" "$ROOT/config.json"
-  echo "Created config.json"
+if [[ ! -f "$CONFIG_PATH" ]]; then
+  mkdir -p "$(dirname "$CONFIG_PATH")"
+  install -m 600 "$ROOT/config.example.json" "$CONFIG_PATH"
+  echo "[install] created config: $CONFIG_PATH"
 fi
 
 if [[ ! -f "$ROOT/models/silero_vad.onnx" ]]; then

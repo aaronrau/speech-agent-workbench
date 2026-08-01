@@ -119,15 +119,15 @@
     "agents": [
       {
         "name": "Flux",
-        "path": "~"
+        "path": "~/"
       },
       {
         "name": "Brock",
-        "path": "~"
+        "path": "~/"
       },
       {
         "name": "Pike",
-        "path": "~"
+        "path": "~/"
       }
     ],
     "layout": "panes",

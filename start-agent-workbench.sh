@@ -19,7 +19,9 @@ if [[ "${VOICE_WORKBENCH_PLATFORM_DISPATCHED:-0}" != "1" ]]; then
 fi
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin${PATH:+:$PATH}:/usr/sbin:/usr/bin:/sbin:/bin"
-CONFIG_PATH="${VOICE_HOTKEY_CONFIG:-$ROOT/config.json}"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/config-path.sh"
+CONFIG_PATH="${VOICE_HOTKEY_CONFIG:-$(default_voice_config_path)}"
 
 SESSION_NAME="${SESSION_NAME:-}"
 AGENT_COMMAND="${AGENT_COMMAND:-}"
@@ -217,6 +219,9 @@ config["agent_workbench"] = {
     },
 }
 
+directory = os.path.dirname(path)
+if directory:
+    os.makedirs(directory, exist_ok=True)
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(config, handle, indent=2, sort_keys=True)
     handle.write("\n")

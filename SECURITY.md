@@ -13,7 +13,7 @@ than opening a public issue.
 
 Do not commit:
 
-- `config.json`
+- user config files such as `~/.config/speech-agent-workbench/config.json`
 - downloaded model files
 - generated audio samples
 - local cache directories
