@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -155,10 +156,10 @@ DEFAULT_CONFIG = {
     "agent_completion_log_retention_seconds": 3600,
     "agent_completion_log_max_bytes": 262144,
     "agent_completion_log_poll_seconds": 0.2,
-    "api_enabled": False,
+    "api_enabled": True,
     "api_host": "auto",
     "api_port": 8787,
-    "api_token": None,
+    "api_token": "auto",
     "api_websocket_enabled": True,
     "api_websocket_heartbeat_seconds": 20.0,
     "api_websocket_max_message_bytes": 65536,
@@ -215,6 +216,8 @@ TMUX_WEBHOOK_LAST_DETAIL_LINES = {}
 TMUX_WEBHOOK_LAST_DETAIL_LINES_LOCK = threading.Lock()
 ACTIVE_VOICE_API_SERVER = None
 ACTIVE_VOICE_API_SERVER_LOCK = threading.Lock()
+GENERATED_VOICE_API_TOKEN = None
+GENERATED_VOICE_API_TOKEN_LOCK = threading.Lock()
 ALLOWED_TRANSCRIPT_SYMBOLS = {".", "+"}
 
 
@@ -5944,12 +5947,20 @@ def get_voice_api_advertised_host(config, bind_host=None):
 
 
 def get_voice_api_token(config):
-    return get_config_string(
+    configured = get_config_string(
         config,
         "VOICE_API_TOKEN",
         "api_token",
         DEFAULT_CONFIG["api_token"],
     )
+    if str(configured or "").strip().lower() != "auto":
+        return configured
+
+    global GENERATED_VOICE_API_TOKEN
+    with GENERATED_VOICE_API_TOKEN_LOCK:
+        if GENERATED_VOICE_API_TOKEN is None:
+            GENERATED_VOICE_API_TOKEN = secrets.token_urlsafe(24)
+        return GENERATED_VOICE_API_TOKEN
 
 
 def format_voice_api_url_host(host):

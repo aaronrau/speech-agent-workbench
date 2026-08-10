@@ -460,6 +460,22 @@ class VoiceApiWebSocketConfigTests(unittest.TestCase):
             "/events",
         )
 
+    def test_auto_api_token_is_generated_once_per_process(self):
+        with mock.patch.object(app, "GENERATED_VOICE_API_TOKEN", None), mock.patch.object(
+            app.secrets,
+            "token_urlsafe",
+            return_value="generated-secret",
+        ) as generate_token:
+            first = app.get_voice_api_token({"api_token": "auto"})
+            second = app.get_voice_api_token({"api_token": "auto"})
+
+        self.assertEqual(first, "generated-secret")
+        self.assertEqual(second, "generated-secret")
+        generate_token.assert_called_once_with(24)
+
+    def test_explicit_null_api_token_disables_authentication(self):
+        self.assertIsNone(app.get_voice_api_token({"api_token": None}))
+
     def test_summary_dispatch_keeps_webhook_and_websocket_delivery(self):
         websocket_server = mock.Mock(websocket_enabled=True)
         app.set_active_voice_api_server(websocket_server)

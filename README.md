@@ -63,7 +63,8 @@ Reattach to the default session with `tmux attach -t speech-workbench`.
 
 ### Message API Commands
 
-Enable the local API with a token:
+The local API starts automatically with `./run-auto.sh`. Startup prints its
+detected LAN address and a generated secret. To supply a stable token instead:
 
 ```bash
 VOICE_API_ENABLED=1 VOICE_API_TOKEN=local-secret ./run-auto.sh
@@ -459,8 +460,10 @@ command.
 
 ### Local Message API
 
-Enable the local API to route text into known tmux agent targets without using
-the microphone:
+The local API starts by default with `./run-auto.sh` so text can be routed into
+known tmux agent targets without using the microphone. By default it binds to
+the local network and generates a new bearer token for each process. To use a
+stable token instead:
 
 ```bash
 VOICE_API_ENABLED=1 VOICE_API_TOKEN=local-secret ./run-auto.sh
@@ -476,9 +479,12 @@ local to the computer. If the startup lines are absent, the workbench API is
 not running and callers will receive a connection failure.
 
 The next line prints `[api] WebSocket secret: <token>` so the value can be
-entered in the connecting client. It prints `none required` when API
-authentication is disabled. Because the configured token is visible in the
-voice pane and its logs, protect those logs and use a local-only token.
+entered in the connecting client. Set `api_token` or `VOICE_API_TOKEN` to a
+stable value when the connecting client cannot be updated after a restart. Set
+it explicitly to `null` or an empty value to disable authentication, and set
+`api_enabled` or `VOICE_API_ENABLED` to `false` to disable the listener.
+Because the token is visible in the voice pane and its logs, protect those logs
+and use a local-only token.
 
 `run-auto.sh` also loads local defaults from `.env` when that file exists.
 Values supplied explicitly in the shell take precedence over `.env` values.

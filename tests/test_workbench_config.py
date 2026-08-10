@@ -25,7 +25,9 @@ class DefaultConfigTests(unittest.TestCase):
         self.assertFalse(config["audio_debug"])
         self.assertEqual(config["parakeet_onnx_provider"], "cpu")
         self.assertFalse(config["auto_tmux_summary_console_log"])
+        self.assertTrue(config["api_enabled"])
         self.assertEqual(config["api_host"], "auto")
+        self.assertEqual(config["api_token"], "auto")
         self.assertTrue(config["api_websocket_enabled"])
         self.assertEqual(config["api_websocket_path"], "/ws")
         self.assertEqual(config["api_websocket_replay_events"], 100)
@@ -33,6 +35,8 @@ class DefaultConfigTests(unittest.TestCase):
             config["auto_trigger_silence_seconds"],
             DEFAULT_CONFIG["auto_trigger_silence_seconds"],
         )
+        self.assertEqual(config["api_enabled"], DEFAULT_CONFIG["api_enabled"])
+        self.assertEqual(config["api_token"], DEFAULT_CONFIG["api_token"])
         self.assertEqual(
             [agent["name"] for agent in config["agent_workbench"]["agents"]],
             ["Flux", "Brock", "Pike"],
