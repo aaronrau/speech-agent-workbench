@@ -210,6 +210,7 @@ fi
 case "${VOICE_INSTALL_FULL_REQUIREMENTS:-1}" in
   0|false|no|off)
     "$VENV_DIR/bin/python" -m pip install \
+      aiohttp \
       numpy \
       sounddevice \
       soundfile \

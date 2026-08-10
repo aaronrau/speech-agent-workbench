@@ -109,6 +109,28 @@ class PlatformLauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertEqual(result.stdout.strip(), "1|loaded")
 
+    def test_lightweight_runtime_installs_websocket_dependency(self):
+        run_path = os.path.join(self.repo_root, "run.sh")
+        with open(run_path, encoding="utf-8") as handle:
+            run_launcher = handle.read()
+        ensure_start = run_launcher.index("ensure_python_env() {")
+        ensure_end = run_launcher.index("\n}\n\nensure_faster_whisper", ensure_start)
+        ensure_python_env = run_launcher[ensure_start:ensure_end]
+
+        self.assertIn('"aiohttp"', ensure_python_env)
+        self.assertIn(
+            '"$PYTHON_BIN" -m pip install \\\n          aiohttp \\',
+            ensure_python_env,
+        )
+
+        install_path = os.path.join(self.repo_root, "install.sh")
+        with open(install_path, encoding="utf-8") as handle:
+            installer = handle.read()
+        self.assertIn(
+            '"$VENV_DIR/bin/python" -m pip install \\\n      aiohttp \\',
+            installer,
+        )
+
     def test_installer_fails_when_tmux_is_missing_after_package_stage(self):
         env = os.environ.copy()
         env.update(
