@@ -4980,9 +4980,15 @@ def build_tmux_summary_messages(agent_label, command_text, lines):
             "role": "system",
             "content": (
                 "You summarize terminal output for a voice-controlled coding "
-                "workbench. Return exactly one concise sentence. Say whether "
-                "the task appears complete, failed, blocked, or still in progress "
-                "when the output supports it. Do not include markdown."
+                "workbench. Return exactly one concise, detailed sentence when "
+                "the output contains only a small amount of useful information. "
+                "Return exactly two concise, detailed sentences when the output "
+                "contains many useful details. "
+                "Include all useful concrete details supported by the output, "
+                "such as what changed, commands or tests run and their results, "
+                "errors or blockers, and the next step. Say whether the task "
+                "appears complete, failed, blocked, or still in progress when "
+                "the output supports it. Do not include markdown."
             ),
         },
         {
@@ -4992,18 +4998,20 @@ def build_tmux_summary_messages(agent_label, command_text, lines):
                 f"Original command: {command}\n"
                 "Last terminal output lines:\n"
                 f"{output}\n\n"
-                "One-sentence summary:"
+                "Adaptive one- or two-sentence summary:"
             ),
         },
     ]
 
 
-def clean_one_sentence_summary(text):
+def clean_tmux_summary(text):
     cleaned = " ".join(str(text or "").split())
     if not cleaned:
         return ""
-    match = re.search(r"(.+?[.!?])(?:\s|$)", cleaned)
-    return match.group(1).strip() if match else cleaned
+    sentence_ends = list(re.finditer(r"[.!?](?=\s|$)", cleaned))
+    if len(sentence_ends) > 2:
+        return cleaned[: sentence_ends[1].end()].strip()
+    return cleaned
 
 
 def summarize_tmux_agent_output(config, agent_label, command_text, lines):
@@ -5021,7 +5029,7 @@ def summarize_tmux_agent_output(config, agent_label, command_text, lines):
         max_tokens=max_tokens,
         timeout=get_transcript_correction_llama_cpp_timeout(config),
     )
-    return clean_one_sentence_summary(summary)
+    return clean_tmux_summary(summary)
 
 
 def configured_tmux_summary_line_limit(config):

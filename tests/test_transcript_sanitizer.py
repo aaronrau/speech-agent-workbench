@@ -242,6 +242,34 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertIn("Original command: add focused tests", prompt)
         self.assertIn("edited app.py", prompt)
         self.assertIn("Ran 72 tests OK", prompt)
+        self.assertIn("Adaptive one- or two-sentence summary", prompt)
+        instructions = messages[0]["content"]
+        self.assertIn("exactly one concise, detailed sentence", instructions)
+        self.assertIn("small amount of useful information", instructions)
+        self.assertIn("exactly two concise, detailed sentences", instructions)
+        self.assertIn("many useful details", instructions)
+        self.assertIn("what changed", instructions)
+        self.assertIn("commands or tests run and their results", instructions)
+        self.assertIn("errors or blockers", instructions)
+        self.assertIn("the next step", instructions)
+
+    def test_clean_tmux_summary_preserves_up_to_two_sentences(self):
+        self.assertEqual(
+            app.clean_tmux_summary("Tests passed.  "),
+            "Tests passed.",
+        )
+        self.assertEqual(
+            app.clean_tmux_summary(
+                "Updated app.py and added tests. All 72 tests passed."
+            ),
+            "Updated app.py and added tests. All 72 tests passed.",
+        )
+        self.assertEqual(
+            app.clean_tmux_summary(
+                "Updated app.py. All tests passed. No further work is needed."
+            ),
+            "Updated app.py. All tests passed.",
+        )
 
     def test_format_tmux_summary_detail_removes_tmux_prefixes(self):
         self.assertEqual(
