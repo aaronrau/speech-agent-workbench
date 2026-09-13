@@ -103,6 +103,7 @@
   "transcript_correction_llama_cpp_server_url": "http://127.0.0.1:18087",
   "transcript_correction_llama_cpp_server_autostart": true,
   "transcript_correction_llama_cpp_server_startup_timeout": 60.0,
+  "transcript_correction_llama_cpp_ctx_size": 8192,
   "transcript_correction_llama_cpp_model": "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_0.gguf",
   "transcript_correction_llama_cpp_model_download": true,
   "transcript_correction_llama_cpp_model_repo": "ggml-org/gemma-4-E2B-it-GGUF",

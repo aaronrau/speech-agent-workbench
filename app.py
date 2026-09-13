@@ -180,6 +180,7 @@ DEFAULT_CONFIG = {
     "transcript_correction_llama_cpp_server_url": "http://127.0.0.1:18087",
     "transcript_correction_llama_cpp_server_autostart": True,
     "transcript_correction_llama_cpp_server_startup_timeout": 60.0,
+    "transcript_correction_llama_cpp_ctx_size": 8192,
     "transcript_correction_llama_cpp_model": (
         "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_0.gguf"
     ),
@@ -212,6 +213,11 @@ LLAMA_CPP_SERVER_PROCESS = None
 TMUX_RECENT_COMMANDS = {}
 TMUX_SUMMARY_SNAPSHOTS = {}
 TMUX_SUMMARY_SNAPSHOTS_LOCK = threading.Lock()
+TMUX_SUMMARY_CHARS_PER_TOKEN = 2.25
+TMUX_SUMMARY_CONTEXT_RETRIES = 4
+TMUX_SUMMARY_BACKOFF_BASE_SECONDS = 15.0
+TMUX_SUMMARY_BACKOFF_MAX_SECONDS = 300.0
+TMUX_SUMMARY_CONTEXT_RESERVE_TOKENS = 256
 TMUX_WEBHOOK_LAST_DETAIL_LINES = {}
 TMUX_WEBHOOK_LAST_DETAIL_LINES_LOCK = threading.Lock()
 ACTIVE_VOICE_API_SERVER = None
@@ -3782,6 +3788,16 @@ def get_transcript_correction_llama_cpp_server_startup_timeout(config):
     )
 
 
+def get_transcript_correction_llama_cpp_ctx_size(config):
+    return get_config_int(
+        config,
+        "VOICE_TRANSCRIPT_CORRECTION_LLAMA_CPP_CTX_SIZE",
+        "transcript_correction_llama_cpp_ctx_size",
+        DEFAULT_CONFIG["transcript_correction_llama_cpp_ctx_size"],
+        minimum=512,
+    )
+
+
 def get_transcript_correction_llama_cpp_model(config):
     return get_config_string(
         config,
@@ -4005,7 +4021,7 @@ def ensure_llama_cpp_server(config):
         "-ngl",
         str(get_transcript_correction_llama_cpp_gpu_layers(config)),
         "--ctx-size",
-        "2048",
+        str(get_transcript_correction_llama_cpp_ctx_size(config)),
         "-n",
         str(get_transcript_correction_max_new_tokens(config)),
         "--jinja",
@@ -5014,6 +5030,17 @@ def clean_tmux_summary(text):
     return cleaned
 
 
+def is_llama_cpp_context_overflow(exc):
+    """True when llama-server rejected the prompt for exceeding its context."""
+    if not isinstance(exc, urllib.error.HTTPError) or exc.code != 400:
+        return False
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        return True
+    return "exceed_context_size" in body or "context size" in body
+
+
 def summarize_tmux_agent_output(config, agent_label, command_text, lines):
     max_tokens = get_config_int(
         config,
@@ -5022,14 +5049,31 @@ def summarize_tmux_agent_output(config, agent_label, command_text, lines):
         DEFAULT_CONFIG["auto_tmux_summary_max_new_tokens"],
         minimum=16,
     )
-    messages = build_tmux_summary_messages(agent_label, command_text, lines)
-    summary = run_llama_cpp_chat_completion(
-        config,
-        messages,
-        max_tokens=max_tokens,
-        timeout=get_transcript_correction_llama_cpp_timeout(config),
-    )
-    return clean_tmux_summary(summary)
+    timeout = get_transcript_correction_llama_cpp_timeout(config)
+    summary_lines = list(lines or [])
+    # The running server's real context may be smaller than the configured one
+    # (a pre-existing server, or one started before the setting changed), so
+    # drop the oldest output and retry rather than losing the summary.
+    for _attempt in range(TMUX_SUMMARY_CONTEXT_RETRIES):
+        messages = build_tmux_summary_messages(
+            agent_label,
+            command_text,
+            summary_lines,
+        )
+        try:
+            summary = run_llama_cpp_chat_completion(
+                config,
+                messages,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            if not is_llama_cpp_context_overflow(exc) or len(summary_lines) <= 1:
+                raise
+            summary_lines = summary_lines[len(summary_lines) // 2 :]
+            continue
+        return clean_tmux_summary(summary)
+    return ""
 
 
 def configured_tmux_summary_line_limit(config):
@@ -5042,14 +5086,36 @@ def configured_tmux_summary_line_limit(config):
     )
 
 
+def tmux_summary_context_char_budget(config):
+    """Chars of terminal output that still fit the llama.cpp context window.
+
+    llama-server rejects an oversized prompt with HTTP 400 instead of
+    truncating it, so keep the request inside the window we launched with.
+    Terminal output tokenizes densely (paths, hashes, diffs), so budget a
+    conservative 2.25 chars per token and reserve room for the chat template
+    and the completion.
+    """
+    ctx_size = get_transcript_correction_llama_cpp_ctx_size(config)
+    max_new_tokens = get_config_int(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_MAX_NEW_TOKENS",
+        "auto_tmux_summary_max_new_tokens",
+        DEFAULT_CONFIG["auto_tmux_summary_max_new_tokens"],
+        minimum=16,
+    )
+    prompt_tokens = ctx_size - max_new_tokens - TMUX_SUMMARY_CONTEXT_RESERVE_TOKENS
+    return max(200, int(prompt_tokens * TMUX_SUMMARY_CHARS_PER_TOKEN))
+
+
 def configured_tmux_summary_max_chars(config):
-    return get_config_int(
+    max_chars = get_config_int(
         config,
         "VOICE_AUTO_TMUX_SUMMARY_MAX_CHARS",
         "auto_tmux_summary_max_chars",
         DEFAULT_CONFIG["auto_tmux_summary_max_chars"],
         minimum=200,
     )
+    return min(max_chars, tmux_summary_context_char_budget(config))
 
 
 def cap_tmux_summary_input_lines(lines, max_chars):
@@ -7304,13 +7370,7 @@ def start_auto_tmux_console_log_tailer(config):
         DEFAULT_CONFIG["auto_tmux_summary_lines"],
         minimum=1,
     )
-    summary_max_chars = get_config_int(
-        config,
-        "VOICE_AUTO_TMUX_SUMMARY_MAX_CHARS",
-        "auto_tmux_summary_max_chars",
-        DEFAULT_CONFIG["auto_tmux_summary_max_chars"],
-        minimum=200,
-    )
+    summary_max_chars = configured_tmux_summary_max_chars(config)
     stop_event = threading.Event()
 
     def worker():
@@ -7357,7 +7417,8 @@ def start_auto_tmux_console_log_tailer(config):
         pending_output = []
         last_output_at = None
         agent_states = {}
-        summary_unavailable = False
+        summary_retry_after = 0.0
+        summary_failures = 0
         reported_read_error = False
         while not stop_event.is_set():
             try:
@@ -7450,7 +7511,7 @@ def start_auto_tmux_console_log_tailer(config):
                         if digest == state.get("last_digest"):
                             continue
                         state["last_digest"] = digest
-                        if summary_unavailable:
+                        if now < summary_retry_after:
                             continue
                         try:
                             summary = summarize_tmux_agent_output(
@@ -7460,20 +7521,30 @@ def start_auto_tmux_console_log_tailer(config):
                                 summary_input_lines,
                             )
                         except Exception as exc:
-                            summary_unavailable = True
+                            summary_failures += 1
+                            backoff = min(
+                                TMUX_SUMMARY_BACKOFF_MAX_SECONDS,
+                                TMUX_SUMMARY_BACKOFF_BASE_SECONDS
+                                * (2 ** min(summary_failures - 1, 8)),
+                            )
+                            summary_retry_after = now + backoff
                             print(
-                                "\n[tmux-summary] Optional summaries disabled for "
-                                f"this run: {exc}",
+                                "\n[tmux-summary] summary failed "
+                                f"({summary_failures}); retrying in {backoff:.0f}s: "
+                                f"{exc}",
                                 file=sys.stderr,
                                 flush=True,
                             )
                             print(
                                 "[tmux-summary] Voice capture and routing are still "
-                                "available. Restart after fixing the model.",
+                                "available.",
                                 file=sys.stderr,
                                 flush=True,
                             )
+                            state["last_digest"] = None
                             continue
+                        summary_failures = 0
+                        summary_retry_after = 0.0
                         print_tmux_summary(
                             config,
                             agent_label,

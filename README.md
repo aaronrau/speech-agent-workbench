@@ -290,6 +290,7 @@ custom correction behavior is required.
   "transcript_correction_llama_cpp_model": "models/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_0.gguf",
   "transcript_correction_llama_cpp_model_repo": "ggml-org/gemma-4-E2B-it-GGUF",
   "transcript_correction_llama_cpp_gpu_layers": 99,
+  "transcript_correction_llama_cpp_ctx_size": 8192,
   "transcript_correction_max_new_tokens": 256
 }
 ```
@@ -299,6 +300,16 @@ OpenAI-compatible chat endpoint, so the GGUF stays loaded between utterances.
 If no server can be reached or started, it falls back to one-shot `llama-cli`.
 Use a `llama-cli`/`llama-server` pair built from the same llama.cpp build, for
 example a local ROCm/HIP build plus a compatible GGUF model.
+
+`transcript_correction_llama_cpp_ctx_size` is the `--ctx-size` the autostarted
+`llama-server` uses. It also bounds tmux agent summaries: `llama-server` answers
+an oversized prompt with `HTTP 400 Bad Request` rather than truncating it, so
+`auto_tmux_summary_max_chars` is clamped to whatever fits this window, and a
+summary that still overflows is retried with the oldest output dropped. Raise
+this value before raising `auto_tmux_summary_max_chars`. Note that autostart is
+skipped when a `llama-server` is already reachable on
+`transcript_correction_llama_cpp_server_url`, so stop the running server for a
+new context size to take effect.
 
 Successful pasted or tmux-sent utterances are appended to
 `transcript-history.txt`. When transcript correction details are available, the

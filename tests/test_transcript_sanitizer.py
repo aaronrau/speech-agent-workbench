@@ -2343,5 +2343,116 @@ class SanitizeTranscriptTextTests(unittest.TestCase):
         self.assertTrue(is_likely_bad_transcript("thank you thank you thank you"))
 
 
+class TmuxSummaryContextTests(unittest.TestCase):
+    def test_llama_cpp_server_uses_configured_ctx_size(self):
+        config = {"transcript_correction_llama_cpp_ctx_size": 8192}
+        self.assertEqual(
+            app.get_transcript_correction_llama_cpp_ctx_size(config),
+            8192,
+        )
+
+    def test_ctx_size_has_a_floor(self):
+        config = {"transcript_correction_llama_cpp_ctx_size": 16}
+        self.assertEqual(
+            app.get_transcript_correction_llama_cpp_ctx_size(config),
+            512,
+        )
+
+    def test_summary_max_chars_clamped_to_context_budget(self):
+        config = {
+            "auto_tmux_summary_max_chars": 8000,
+            "auto_tmux_summary_max_new_tokens": 80,
+            "transcript_correction_llama_cpp_ctx_size": 2048,
+        }
+        budget = app.configured_tmux_summary_max_chars(config)
+        self.assertLess(budget, 8000)
+        # 4000 chars measured at ~1484 prompt tokens against a 2048 window.
+        self.assertLessEqual(budget, 4000)
+
+    def test_summary_max_chars_unclamped_when_context_is_large(self):
+        config = {
+            "auto_tmux_summary_max_chars": 8000,
+            "auto_tmux_summary_max_new_tokens": 80,
+            "transcript_correction_llama_cpp_ctx_size": 8192,
+        }
+        self.assertEqual(app.configured_tmux_summary_max_chars(config), 8000)
+
+    def _context_overflow_error(self):
+        import io
+        import urllib.error
+
+        body = json.dumps(
+            {
+                "error": {
+                    "code": 400,
+                    "message": (
+                        "request (2915 tokens) exceeds the available context "
+                        "size (2048 tokens), try increasing it"
+                    ),
+                    "type": "exceed_context_size_error",
+                }
+            }
+        ).encode("utf-8")
+        return urllib.error.HTTPError(
+            "http://127.0.0.1:18087/v1/chat/completions",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(body),
+        )
+
+    def test_detects_context_overflow_error(self):
+        self.assertTrue(
+            app.is_llama_cpp_context_overflow(self._context_overflow_error())
+        )
+
+    def test_ignores_unrelated_errors(self):
+        self.assertFalse(app.is_llama_cpp_context_overflow(RuntimeError("boom")))
+
+    def test_summary_retries_with_fewer_lines_on_context_overflow(self):
+        config = {"auto_tmux_summary_max_new_tokens": 80}
+        attempts = []
+        overflow = self._context_overflow_error()
+
+        def fake_completion(_config, messages, max_tokens=None, timeout=None):
+            attempts.append(messages[1]["content"])
+            if len(attempts) == 1:
+                raise overflow
+            return "Tests passed."
+
+        with mock.patch.object(
+            app,
+            "run_llama_cpp_chat_completion",
+            side_effect=fake_completion,
+        ):
+            summary = app.summarize_tmux_agent_output(
+                config,
+                "Flux",
+                "pull the latest",
+                [f"line {index}" for index in range(10)],
+            )
+
+        self.assertEqual(summary, "Tests passed.")
+        self.assertEqual(len(attempts), 2)
+        self.assertIn("line 0", attempts[0])
+        self.assertNotIn("line 0", attempts[1])
+        self.assertIn("line 9", attempts[1])
+
+    def test_summary_reraises_non_context_errors(self):
+        config = {"auto_tmux_summary_max_new_tokens": 80}
+        with mock.patch.object(
+            app,
+            "run_llama_cpp_chat_completion",
+            side_effect=RuntimeError("model missing"),
+        ):
+            with self.assertRaises(RuntimeError):
+                app.summarize_tmux_agent_output(
+                    config,
+                    "Flux",
+                    "pull the latest",
+                    ["line one", "line two"],
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
