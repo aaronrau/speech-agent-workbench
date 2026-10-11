@@ -37,6 +37,7 @@
   "auto_tmux_summary_enabled": true,
   "auto_tmux_summary_console_log": false,
   "auto_tmux_summary_idle_seconds": 5.0,
+  "auto_tmux_summary_stable_seconds": 60.0,
   "auto_tmux_summary_lines": 50,
   "auto_tmux_summary_max_chars": 8000,
   "auto_tmux_summary_max_new_tokens": 80,

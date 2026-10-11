@@ -643,6 +643,17 @@ Idle tmux summaries use `"phase": "in_progress"`. When an agent calls
 `$VOICE_AGENT_SIGNAL_COMMAND done "tests passed"`, the webhook sends a final
 event with `"phase": "final"`, `"is_final": true`, and the latest captured
 `detail_lines` for that agent.
+
+The listener also checks configured agent panes every five seconds. If a
+pane's last 50 lines remain unchanged for 60 seconds, it dispatches a summary
+unless that command and content have already been dispatched. This recovers
+output missed by the console pipe and handles terminal redraws that keep the
+pipe active. Tune the fallback with `VOICE_AUTO_TMUX_SUMMARY_STABLE_SECONDS`
+or `auto_tmux_summary_stable_seconds`; set it to `0` to disable it. Failed or
+empty summaries retain their input and retry with per-agent backoff, even
+without new output. These checks dispatch progress events; explicit agent
+completion signals still determine final events.
+
 Webhook detail lines are incremental per agent: lines already delivered in the
 previous webhook payload for that same agent are omitted from the next
 `detail`/`detail_lines` value.
@@ -685,9 +696,12 @@ pane.
   starts the listener. Override with `AUTO_LOG=/path/to/auto.log`.
 - Agent pane output is piped through
   `${XDG_RUNTIME_DIR:-/tmp}/speech-agent-workbench-console.log` by default. After
-  a pane is idle, the listener summarizes the last 50 lines with the configured
-  Gemma/llama.cpp model and prints the original routed command plus a one-line
-  summary. Tune retention with `VOICE_AUTO_TMUX_CONSOLE_RETENTION_SECONDS`, cap
+  a pane is idle for five seconds, the listener summarizes the last 50 lines
+  with the configured Gemma/llama.cpp model and dispatches the original routed
+  command plus a one- or two-sentence summary. A fallback dispatches unsent pane
+  content after 60 seconds without a change. Enable console summaries with
+  `VOICE_AUTO_TMUX_SUMMARY_CONSOLE_LOG=1`. Tune retention with
+  `VOICE_AUTO_TMUX_CONSOLE_RETENTION_SECONDS`, cap
   size with `VOICE_AUTO_TMUX_CONSOLE_MAX_BYTES`, poll for changes with
   `VOICE_AUTO_TMUX_CONSOLE_POLL_SECONDS`. Raw pane output is not printed in
   summary mode; set `VOICE_AUTO_TMUX_SUMMARY_ENABLED=0` only when debugging the

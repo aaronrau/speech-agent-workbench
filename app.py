@@ -149,6 +149,7 @@ DEFAULT_CONFIG = {
     "auto_tmux_summary_enabled": True,
     "auto_tmux_summary_console_log": False,
     "auto_tmux_summary_idle_seconds": 5.0,
+    "auto_tmux_summary_stable_seconds": 60.0,
     "auto_tmux_summary_lines": 50,
     "auto_tmux_summary_max_chars": 8000,
     "auto_tmux_summary_max_new_tokens": 80,
@@ -7304,7 +7305,39 @@ def start_agent_completion_log_tailer(config):
     return stop_event
 
 
-def start_auto_tmux_console_log_tailer(config):
+def make_tmux_summary_state():
+    return {
+        "chunks": [],
+        "lines": [],
+        "last_output_at": None,
+        "last_digest": None,
+        "captured_lines": None,
+        "content_digest": None,
+        "content_changed_at": None,
+        "pending_lines": None,
+        "pending_command": None,
+        "retry_after": 0.0,
+        "failures": 0,
+    }
+
+
+def update_tmux_summary_capture(state, command_text, lines, now):
+    state["captured_lines"] = list(lines) if lines else None
+    if not lines:
+        state["content_digest"] = None
+        state["content_changed_at"] = None
+        return
+    digest = tmux_summary_digest(command_text, lines)
+    if digest != state["content_digest"]:
+        state["content_digest"] = digest
+        state["content_changed_at"] = now
+        if state["pending_lines"] and digest != tmux_summary_digest(
+            state["pending_command"], state["pending_lines"]
+        ):
+            state["pending_lines"] = None
+
+
+def start_auto_tmux_console_log_tailer(config, commands=None):
     path = get_auto_tmux_console_log_path(config)
     if not path:
         return None
@@ -7363,6 +7396,13 @@ def start_auto_tmux_console_log_tailer(config):
         DEFAULT_CONFIG["auto_tmux_summary_idle_seconds"],
         minimum=0.0,
     )
+    summary_stable_seconds = get_config_float(
+        config,
+        "VOICE_AUTO_TMUX_SUMMARY_STABLE_SECONDS",
+        "auto_tmux_summary_stable_seconds",
+        DEFAULT_CONFIG["auto_tmux_summary_stable_seconds"],
+        minimum=0.0,
+    )
     summary_lines = get_config_int(
         config,
         "VOICE_AUTO_TMUX_SUMMARY_LINES",
@@ -7371,6 +7411,18 @@ def start_auto_tmux_console_log_tailer(config):
         minimum=1,
     )
     summary_max_chars = configured_tmux_summary_max_chars(config)
+    command_index = {}
+    capture_commands = {}
+    if summary_enabled and summary_stable_seconds > 0:
+        if commands is None:
+            commands = build_auto_tmux_switch_commands(config)
+        command_index, agent_labels = build_api_agent_command_index(commands)
+        capture_commands = {
+            label: command_index[normalize_tmux_agent_key(label)]
+            for label in agent_labels
+            if not tmux_summary_webhook_agent_excluded(config, label)
+        }
+    capture_poll_seconds = max(poll_seconds, min(5.0, summary_stable_seconds))
     stop_event = threading.Event()
 
     def worker():
@@ -7417,8 +7469,7 @@ def start_auto_tmux_console_log_tailer(config):
         pending_output = []
         last_output_at = None
         agent_states = {}
-        summary_retry_after = 0.0
-        summary_failures = 0
+        next_capture_at = 0.0
         reported_read_error = False
         while not stop_event.is_set():
             try:
@@ -7440,15 +7491,20 @@ def start_auto_tmux_console_log_tailer(config):
                                 agent_label, agent_payload = (
                                     extract_tmux_console_agent_payload(payload)
                                 )
-                                if agent_label:
+                                if (
+                                    agent_label
+                                    and not tmux_summary_webhook_agent_excluded(
+                                        config, agent_label
+                                    )
+                                ):
+                                    command = command_index.get(
+                                        normalize_tmux_agent_key(agent_label)
+                                    )
+                                    if command:
+                                        agent_label = command.get("label") or agent_label
                                     state = agent_states.setdefault(
                                         agent_label,
-                                        {
-                                            "chunks": [],
-                                            "lines": [],
-                                            "last_output_at": None,
-                                            "last_digest": None,
-                                        },
+                                        make_tmux_summary_state(),
                                     )
                                     state["chunks"].append(agent_payload)
                                     trim_text_chunk_buffer(
@@ -7477,41 +7533,107 @@ def start_auto_tmux_console_log_tailer(config):
                     agent_states[agent_label]["last_output_at"] = now
 
                 if summary_enabled:
+                    # The pipe contains cursor updates and redraws as well as
+                    # text. Compare actual pane contents independently of it.
+                    if capture_commands and now >= next_capture_at:
+                        for agent_label, command in capture_commands.items():
+                            state = agent_states.setdefault(
+                                agent_label, make_tmux_summary_state()
+                            )
+                            captured_lines, error = capture_tmux_target_lines(
+                                config, command
+                            )
+                            command_record = get_tmux_sent_command(
+                                agent_label, command.get("tmux_send_target")
+                            )
+                            command_text = (
+                                command_record.get("text") if command_record else ""
+                            )
+                            update_tmux_summary_capture(
+                                state,
+                                command_text,
+                                captured_lines if not error else None,
+                                now,
+                            )
+                        next_capture_at = now + capture_poll_seconds
+
                     for agent_label, state in list(agent_states.items()):
-                        if not tmux_console_buffer_should_flush(
+                        idle_ready = tmux_console_buffer_should_flush(
                             state["chunks"],
                             state["last_output_at"],
                             summary_idle_seconds,
                             now=now,
-                        ):
-                            continue
-                        lines = tmux_console_payload_to_lines(
-                            "".join(state["chunks"])
                         )
-                        state["chunks"].clear()
-                        if not lines:
-                            continue
-                        state["lines"].extend(lines)
-                        trim_tmux_agent_lines(state["lines"], summary_lines)
-                        summary_input_lines = list(state["lines"])[-summary_lines:]
-                        while (
-                            summary_max_chars > 0
-                            and len("\n".join(summary_input_lines)) > summary_max_chars
-                            and len(summary_input_lines) > 1
-                        ):
-                            summary_input_lines.pop(0)
                         command_record = get_tmux_sent_command(agent_label)
                         command_text = (
                             command_record.get("text") if command_record else ""
                         )
+                        summary_input_lines = None
+                        if idle_ready:
+                            lines = tmux_console_payload_to_lines(
+                                "".join(state["chunks"])
+                            )
+                            state["chunks"].clear()
+                            if lines:
+                                state["lines"].extend(lines)
+                                trim_tmux_agent_lines(state["lines"], summary_lines)
+                                summary_input_lines = cap_tmux_summary_input_lines(
+                                    state["lines"][-summary_lines:], summary_max_chars
+                                )
+                                command = capture_commands.get(agent_label)
+                                if command:
+                                    captured_lines, error = capture_tmux_target_lines(
+                                        config, command
+                                    )
+                                    update_tmux_summary_capture(
+                                        state,
+                                        command_text,
+                                        captured_lines if not error else None,
+                                        now,
+                                    )
+                                    if state["captured_lines"]:
+                                        summary_input_lines = state["captured_lines"]
+
+                        stable_ready = (
+                            summary_stable_seconds > 0
+                            and bool(state["captured_lines"])
+                            and state["content_changed_at"] is not None
+                            and now - state["content_changed_at"]
+                            >= summary_stable_seconds
+                            and state["content_digest"] == tmux_summary_digest(
+                                command_text, state["captured_lines"]
+                            )
+                        )
+                        if stable_ready:
+                            summary_input_lines = state["captured_lines"]
+                        if summary_input_lines:
+                            digest = tmux_summary_digest(
+                                command_text, summary_input_lines
+                            )
+                            state["pending_lines"] = (
+                                list(summary_input_lines)
+                                if digest != state["last_digest"] else None
+                            )
+                            state["pending_command"] = command_text
+
+                        # Keep unsent input after a failure so a quiet agent can
+                        # retry without requiring another pipe record.
+                        summary_input_lines = state["pending_lines"]
+                        if not summary_input_lines:
+                            continue
+                        if command_text != state["pending_command"]:
+                            state["pending_lines"] = None
+                            continue
+                        if state["chunks"] and not stable_ready:
+                            continue
                         digest = tmux_summary_digest(
                             command_text,
                             summary_input_lines,
                         )
                         if digest == state.get("last_digest"):
+                            state["pending_lines"] = None
                             continue
-                        state["last_digest"] = digest
-                        if now < summary_retry_after:
+                        if now < state["retry_after"]:
                             continue
                         try:
                             summary = summarize_tmux_agent_output(
@@ -7520,17 +7642,27 @@ def start_auto_tmux_console_log_tailer(config):
                                 command_text,
                                 summary_input_lines,
                             )
+                            if not str(summary or "").strip():
+                                raise ValueError("No summary was returned")
+                            dispatch_tmux_summary_webhook(
+                                config,
+                                agent_label,
+                                command_text,
+                                summary,
+                                detail_lines=summary_input_lines,
+                                phase="in_progress",
+                            )
                         except Exception as exc:
-                            summary_failures += 1
+                            state["failures"] += 1
                             backoff = min(
                                 TMUX_SUMMARY_BACKOFF_MAX_SECONDS,
                                 TMUX_SUMMARY_BACKOFF_BASE_SECONDS
-                                * (2 ** min(summary_failures - 1, 8)),
+                                * (2 ** min(state["failures"] - 1, 8)),
                             )
-                            summary_retry_after = now + backoff
+                            state["retry_after"] = time.monotonic() + backoff
                             print(
                                 "\n[tmux-summary] summary failed "
-                                f"({summary_failures}); retrying in {backoff:.0f}s: "
+                                f"({state['failures']}); retrying in {backoff:.0f}s: "
                                 f"{exc}",
                                 file=sys.stderr,
                                 flush=True,
@@ -7541,23 +7673,18 @@ def start_auto_tmux_console_log_tailer(config):
                                 file=sys.stderr,
                                 flush=True,
                             )
-                            state["last_digest"] = None
                             continue
-                        summary_failures = 0
-                        summary_retry_after = 0.0
+                        state["last_digest"] = digest
+                        state["pending_lines"] = None
+                        state["failures"] = 0
+                        state["retry_after"] = 0.0
+                        if stable_ready:
+                            state["chunks"].clear()
                         print_tmux_summary(
                             config,
                             agent_label,
                             command_text,
                             summary,
-                        )
-                        dispatch_tmux_summary_webhook(
-                            config,
-                            agent_label,
-                            command_text,
-                            summary,
-                            detail_lines=summary_input_lines,
-                            phase="in_progress",
                         )
                 elif tmux_console_buffer_should_flush(
                     pending_output,
@@ -8936,7 +9063,9 @@ def run_auto_with_stt_disabled(config, run_mode):
     start_transcript_correction_server_background(config)
     signal_voice_ready(run_mode, "disabled", "stt-disabled")
     log_tmux_summary_webhook_configuration(config)
-    tmux_console_log_tailer = start_auto_tmux_console_log_tailer(config)
+    tmux_console_log_tailer = start_auto_tmux_console_log_tailer(
+        config, auto_shell_commands
+    )
     agent_completion_log_tailer = start_agent_completion_log_tailer(config)
     voice_api_server = start_voice_api_server(config, auto_shell_commands)
     print(
@@ -9306,7 +9435,9 @@ def main():
     voice_api_server = None
     if run_mode == "auto":
         log_tmux_summary_webhook_configuration(config)
-        tmux_console_log_tailer = start_auto_tmux_console_log_tailer(config)
+        tmux_console_log_tailer = start_auto_tmux_console_log_tailer(
+            config, auto_shell_commands
+        )
         agent_completion_log_tailer = start_agent_completion_log_tailer(config)
         voice_api_server = start_voice_api_server(config, auto_shell_commands)
 
